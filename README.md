@@ -19,38 +19,45 @@
 | 超额拦截 | 可做 | 物理上做不到 | 网关拦截 |
 | 员工无需登录 | — | — | 密钥由服务端下发 |
 
+## 设计前提：不碰你的 codex
+
+你的 `codex` 和 `~/.codex/` 保持原样。号池走的是一个独立命令 **`mcodex`**，它有自己的家目录 `~/.mcodex`。两者并存：
+
+```
+codex   →  provider: openai  →  你的个人 ChatGPT 订阅
+mcodex  →  provider: gw      →  公司号池网关  →  Pro 账号 A/B/N
+```
+
+同一台机器、同一个模型，走不同上游，互不影响。
+
 ## 原理
 
-三个已验证的机制串起来，全是既有行为，没有一处 hack：
+`mcodex` 是个薄封装：准备好环境后用 `execvp` 交棒给真 codex，argv 与 stdio 原样透传。它覆盖两种场景：
 
-1. **multica daemon 把宿主 `~/.codex/config.toml` 原样拷贝进每个 per-task `CODEX_HOME`**，并且只往拷贝里 upsert 自己的托管块，不碰 `[model_providers.*]`。
-   → 所以把号池 provider 写进宿主配置，就会自动流到每个任务。
+**你直接用** — 设 `CODEX_HOME=~/.mcodex`（那里有号池 provider 配置和密钥），然后 exec codex。
 
-2. **codex 的自定义 provider 用 `env_key` 从环境变量取密钥，且优先于 `auth.json`**，有 `env_key` 时不需要 `codex login`。
-   → 所以每人一把密钥，不用分发账号。
-
-3. **multica 的 `custom_env` 会被 daemon 铺到 codex 子进程环境**，且不拦自定义变量名。
-   → 所以密钥可以按人下发到各自的 agent。
+**multica daemon 拉起** — daemon 会把 `CODEX_HOME` 指向 per-task 目录并从 `~/.codex/config.toml` 拷一份配置进去。既然宿主那份不含号池 provider，`mcodex` 就在 exec 前把 provider 注入这份 per-task 配置。daemon 准备完就不再动它，所以这个时机是安全的，且每个任务都是新目录。
 
 ```
-宿主 ~/.codex/config.toml          multica agent custom_env
-   [model_providers.gw]                  GW_API_KEY=sk-clb-…
-   base_url = 号池网关                        │
-        │                                    │
-        └──── daemon 拷贝 ────┐    ┌── daemon 注入 ──┘
-                             ▼    ▼
-                    per-task CODEX_HOME + env
-                             │
-                             ▼
-                    codex app-server
-                             │  POST /v1/responses
-                             ▼
-                      codex-lb 号池网关
-                             │
-              ┌──────────────┼──────────────┐
-              ▼              ▼              ▼
-         Pro 账号 A     Pro 账号 B     Pro 账号 N
+                    你 ──────────────────────► mcodex ──► CODEX_HOME=~/.mcodex
+                                                  │
+multica ──► daemon ──► MULTICA_CODEX_PATH=mcodex ─┘        （注入 per-task 配置）
+                                                  │
+                                                  ▼  execvp（argv/stdio 原样透传）
+                                          codex app-server
+                                                  │  POST /v1/responses
+                                                  ▼
+                                          codex-lb 号池网关
+                                    ┌─────────────┼─────────────┐
+                                    ▼             ▼             ▼
+                               Pro 账号 A    Pro 账号 B    Pro 账号 N
 ```
+
+背后依赖三个既有机制，全是上游本来的行为，没有一处 hack：
+
+1. **codex 自定义 provider 的 `env_key` 从环境变量取密钥，且优先于 `auth.json`**，有 `env_key` 时不需要 `codex login` → 每人一把密钥，不用分发账号。
+2. **multica daemon 支持 `MULTICA_CODEX_PATH` 指定 codex 可执行文件路径** → 不改 multica 就能换成 `mcodex`。
+3. **multica 的 `custom_env` 会被 daemon 铺到 codex 子进程环境**，且不拦自定义变量名 → 密钥可以按人下发到各自的 agent。
 
 完整的源码级论证见 [`docs/设计方案.md`](docs/设计方案.md)，所有断言都带 `path:line`。
 
@@ -66,23 +73,51 @@ cp .env.example .env   # 填写网关地址与管理面密码
 
 ## 用法
 
+### 员工本机
+
 ```bash
-# 1. 把号池 provider 注入宿主 codex 配置（幂等，自动备份）
-poolctl setup --dry-run    # 先看要改什么
-poolctl setup
+# 签发密钥（在管理机上做），然后在员工机上初始化 mcodex
+poolctl issue zhangsan --weekly-token-limit 20000000
+echo "<密钥>" | poolctl mcodex init --key-stdin
 
-# 2. 为员工签发密钥，并下发到他的 multica agent
-poolctl issue zhangsan --agent-id <agent-uuid> --weekly-token-limit 20000000
-
-# 3. 体检
-poolctl doctor --key sk-clb-...
-
-# 4. 按人看用量
-poolctl usage
-
-# 5. 离职/泄露时吊销，网关侧立即生效
-poolctl revoke zhangsan --agent-id <agent-uuid>
+# 之后照常用，只是命令名换成 mcodex
+mcodex exec "重构这个模块"
+mcodex
 ```
+
+`mcodex init` 默认从 `~/.codex/config.toml` 继承使用偏好（模型、推理强度、信任目录），所以手感和平时一致。**只继承偏好，不复制任何凭据。**
+
+### 让 multica 走号池
+
+给 daemon 设一个环境变量即可，不改 multica：
+
+```bash
+export MULTICA_CODEX_PATH="$(poolctl mcodex path)"
+multica daemon restart
+```
+
+daemon 之后拉起的就是 `mcodex`。要按人发不同密钥（一台机器多个 agent），再把密钥写进各自 agent 的 `custom_env`：
+
+```bash
+poolctl issue zhangsan --agent-id <agent-uuid>
+```
+
+`custom_env` 里的密钥优先于 `~/.mcodex/key`，所以两种模式可以混用。
+
+### 运维
+
+```bash
+poolctl doctor --key sk-clb-...   # 链路体检
+poolctl usage                     # 按人看用量
+poolctl revoke zhangsan --agent-id <agent-uuid>   # 吊销，网关侧立即生效
+poolctl status                    # 号池概况
+```
+
+### 不用 mcodex 的另一种做法
+
+`poolctl setup` 会把号池 provider 直接注入宿主 `~/.codex/config.toml`（幂等、自动备份、`poolctl unsetup` 可完整回滚）。这样连 `MULTICA_CODEX_PATH` 都不用设，但**你自己的 `codex` 也会走号池**，且未设 `GW_API_KEY` 时会直接报错。
+
+除非你确实想让整台机器都走号池，否则用 `mcodex`。
 
 `poolctl usage` 输出：
 
@@ -99,10 +134,22 @@ pool-lisi                       14      75,818           0       127     0.0%   
 
 在真实环境端到端跑通（codex-cli 0.147.0 / multica 0.3.17 / codex-lb）：
 
-- codex 启动横幅显示 `provider: gw`，请求出现在网关日志，按密钥正确归属
-- multica daemon 拉起的 codex，其 per-task `codex-home/config.toml` 完整继承号池块，TOML 语义正确，与 multica 自己的托管块共存不冲突
-- codex 子进程环境同时拿到 `GW_API_KEY`、`CODEX_HOME`、`MULTICA_TASK_ID`/`AGENT_ID`/`WORKSPACE_ID`
-- `poolctl doctor` 10 项全通过
+**隔离性** — 同一台机器上做对照，同一个模型：
+
+| 命令 | 启动横幅 | 网关日志 |
+|---|---|---|
+| `codex` | `provider: openai` | 0 条新增 |
+| `mcodex` | `provider: gw` | +1 条，按密钥正确归属 |
+
+**multica 链路** — `MULTICA_CODEX_PATH` 指向 mcodex 后派真实任务：
+
+- daemon 日志确认 `exec=/…/mcodex args="[app-server --listen stdio://]"`，参数完整透传
+- mcodex 成功把 provider 注入 per-task `codex-home/config.toml`，与 multica 自己的托管块共存不冲突
+- codex 子进程同时拿到 `GW_API_KEY`、`CODEX_HOME`、`MULTICA_TASK_ID`/`AGENT_ID`/`WORKSPACE_ID`
+- 任务正常完成，请求以 `ua=multica-agent-sdk` 出现在网关日志
+- 连续三轮的缓存命中率 0% → 91.8% → 93.9%，**证明经号池中转不丢提示词缓存**——这是方案经济性的前提
+
+`poolctl doctor` 12 项通过 0 失败，58 个单测全过。
 
 ## 几件必须知道的事
 

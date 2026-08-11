@@ -13,6 +13,8 @@ dev = ["pytest>=8.0"]
 
 [project.scripts]
 poolctl = "corp_codex_pool.cli:main"
+# 走号池的独立 codex 封装。与系统 codex 并存，互不影响。
+mcodex = "corp_codex_pool.mcodex:main"
 
 [build-system]
 requires = ["setuptools>=68"]

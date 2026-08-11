@@ -395,6 +395,87 @@ def doctor(ctx, key, config_path, as_json):
     sys.exit(0 if passed else 1)
 
 
+# ---------------------------------------------------------------- mcodex
+
+@main.group()
+def mcodex():
+    """管理 mcodex —— 走号池的独立 codex 封装。
+
+    mcodex 使用自己的家目录（默认 ~/.mcodex），不碰用户的 ~/.codex。
+    `codex` 走个人订阅，`mcodex` 走公司号池，两者并存。
+    """
+
+
+@mcodex.command("init")
+@click.option("--key", help="号池密钥明文，存入家目录（600）")
+@click.option("--key-stdin", is_flag=True, help="从 stdin 读密钥，避免出现在 shell 历史")
+@click.option("--inherit/--no-inherit", default=True, show_default=True,
+              help="从 ~/.codex/config.toml 继承使用偏好（模型、信任目录），不含任何凭据")
+@click.option("--home", type=click.Path(path_type=Path), help="自定义家目录")
+@click.option("--real-codex", type=click.Path(path_type=Path),
+              help="真 codex 的绝对路径。不给则自动探测并固化，"
+                   "避免 daemon 与登录 shell 因 PATH 不同选到不同二进制")
+@click.pass_context
+def mcodex_init(ctx, key, key_stdin, inherit, home, real_codex):
+    """初始化 mcodex 家目录。"""
+    from .mcodex import DEFAULT_MCODEX_HOME, McodexError, init_home
+
+    settings = _settings(ctx)
+
+    if key_stdin:
+        key = sys.stdin.read().strip()
+
+    spec = ProviderSpec(
+        provider_id=settings.provider_id,
+        base_url=settings.pool_base_url,
+        env_key=settings.env_key,
+    )
+
+    target = home or DEFAULT_MCODEX_HOME
+    try:
+        info = init_home(
+            target,
+            spec,
+            inherit_from=Path.home() / ".codex" / "config.toml" if inherit else None,
+            key=key,
+            real_codex=str(real_codex) if real_codex else None,
+        )
+    except McodexError as exc:
+        _fail(str(exc))
+        return
+
+    click.secho(f"✓ mcodex 家目录就绪：{info['home']}", fg="green")
+    click.echo(f"  配置：{info['config']}")
+    click.echo(f"  provider = {spec.provider_id}   base_url = {spec.base_url}")
+    if info["real_codex"]:
+        click.echo(f"  真 codex：{info['real_codex']}（已固化）")
+    else:
+        click.secho("  ! 未探测到 codex，请用 --real-codex 指定", fg="yellow")
+    if info["inherited"]:
+        click.echo(f"  已继承偏好：{', '.join(info['inherited'])}（未复制任何凭据）")
+    if info["key_stored"]:
+        click.echo(f"  密钥已存入 {info['home']}/key（600）")
+    else:
+        click.secho(
+            f"  ! 尚无密钥。设置环境变量 {settings.env_key}，"
+            f"或重跑本命令带 --key-stdin",
+            fg="yellow",
+        )
+    click.echo(f"\n你的 ~/.codex 未被改动。现在可以直接用：mcodex exec \"...\"")
+
+
+@mcodex.command("path")
+def mcodex_path():
+    """打印 mcodex 可执行文件路径，用于配置 MULTICA_CODEX_PATH。"""
+    import shutil as _shutil
+
+    found = _shutil.which("mcodex")
+    if not found:
+        click.secho("未在 PATH 中找到 mcodex。请先 pip install -e .", fg="yellow")
+        sys.exit(1)
+    click.echo(found)
+
+
 # ---------------------------------------------------------------- status
 
 @main.command()
