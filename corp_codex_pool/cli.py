@@ -337,22 +337,49 @@ def usage(ctx, since, until, max_records, by_session, as_json):
         return
 
     click.echo(f"共 {len(rows)} 条请求，按密钥归集：\n")
-    header = f"{'密钥':<28}{'请求':>6}{'输入':>12}{'缓存':>12}{'输出':>10}{'命中率':>9}{'成本USD':>11}"
+    header = (
+        f"{'密钥':<26}{'请求':>6}{'输入':>12}{'缓存':>12}{'命中率':>9}"
+        f"{'延迟中位':>10}{'最慢':>10}{'成本USD':>11}"
+    )
     click.echo(header)
     click.echo("-" * len(header))
+
+    def fmt_latency(ms):
+        if ms is None:
+            return "—"
+        return f"{ms / 1000:.1f}s" if ms < 60_000 else f"{ms / 60_000:.1f}m"
 
     for bucket in sorted(summary.values(), key=lambda b: -b["costUsd"]):
         name = bucket["apiKeyName"] or "(未归属)"
         rate = f"{bucket['cacheHitRate']:.1%}" if bucket["cacheHitRate"] is not None else "—"
         click.echo(
-            f"{name:<28}{bucket['requests']:>6}{bucket['inputTokens']:>12,}"
-            f"{bucket['cachedInputTokens']:>12,}{bucket['outputTokens']:>10,}"
-            f"{rate:>9}{bucket['costUsd']:>11.4f}"
+            f"{name:<26}{bucket['requests']:>6}{bucket['inputTokens']:>12,}"
+            f"{bucket['cachedInputTokens']:>12,}{rate:>9}"
+            f"{fmt_latency(bucket['latencyP50Ms']):>10}"
+            f"{fmt_latency(bucket['latencyMaxMs']):>10}{bucket['costUsd']:>11.4f}"
         )
 
     total = sum(b["costUsd"] for b in summary.values())
     click.echo("-" * len(header))
-    click.echo(f"{'合计':<28}{len(rows):>6}{'':>12}{'':>12}{'':>10}{'':>9}{total:>11.4f}")
+    click.echo(
+        f"{'合计':<26}{len(rows):>6}{'':>12}{'':>12}{'':>9}{'':>10}{'':>10}{total:>11.4f}"
+    )
+
+    # 上游劣化时单次请求可能超过 multica 的 10 分钟 semantic inactivity timeout，
+    # 任务会被杀掉而请求其实是成功的。把这条提到明面上，免得被当成号池故障。
+    slowest = max(
+        (b["latencyMaxMs"] or 0 for b in summary.values()),
+        default=0,
+    )
+    if slowest >= 600_000:
+        click.secho(
+            f"\n! 最慢一次请求耗时 {slowest / 60_000:.1f} 分钟，已超过 multica 的 "
+            "10 分钟无活动超时。\n"
+            "  上游劣化期间 multica 任务会被判定为 codex_semantic_inactivity 而失败，"
+            "但网关侧请求其实是成功的（额度照扣）。\n"
+            "  该失败原因在 multica 的可重试列表里，会自动重试并再次消耗额度。",
+            fg="yellow",
+        )
 
 
 def _print_sessions(rows, as_json: bool) -> None:

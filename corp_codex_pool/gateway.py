@@ -313,6 +313,7 @@ def summarize_by_key(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
                 "reasoningTokens": 0,
                 "costUsd": 0.0,
                 "conversations": set(),
+                "latencies": [],
             },
         )
         bucket["requests"] += 1
@@ -321,6 +322,8 @@ def summarize_by_key(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         bucket["costUsd"] += row.get("costUsd") or 0.0
         if row.get("conversationId"):
             bucket["conversations"].add(row["conversationId"])
+        if row.get("latencyMs") is not None:
+            bucket["latencies"].append(row["latencyMs"])
 
     for bucket in summary.values():
         bucket["conversationCount"] = len(bucket.pop("conversations"))
@@ -329,4 +332,7 @@ def summarize_by_key(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
         bucket["cacheHitRate"] = (
             round(bucket["cachedInputTokens"] / total_input, 4) if total_input else None
         )
+        latencies = sorted(bucket.pop("latencies"))
+        bucket["latencyP50Ms"] = latencies[len(latencies) // 2] if latencies else None
+        bucket["latencyMaxMs"] = latencies[-1] if latencies else None
     return summary
