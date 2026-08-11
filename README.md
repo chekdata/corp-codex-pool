@@ -89,20 +89,33 @@ mcodex
 
 ### 让 multica 走号池
 
-给 daemon 设一个环境变量即可，不改 multica：
-
 ```bash
-export MULTICA_CODEX_PATH="$(poolctl mcodex path)"
-multica daemon restart
+poolctl daemon restart    # 带上 MULTICA_CODEX_PATH 启动
+poolctl daemon status     # 确认它用的确实是 mcodex
 ```
 
-daemon 之后拉起的就是 `mcodex`。要按人发不同密钥（一台机器多个 agent），再把密钥写进各自 agent 的 `custom_env`：
+multica 只能通过 `MULTICA_CODEX_PATH` 环境变量指定 codex 路径（它的 `config.json` 不支持这个键）。直接 `multica daemon start` 拿不到这个变量，daemon 会**悄悄退回系统 codex、绕开号池**——`poolctl daemon status` 就是用来发现这种情况的：
+
+```
+✓ daemon 使用的 codex：/…/mcodex（走号池）
+```
+
+⚠️ 别用 `multica daemon restart` 代替 `poolctl daemon restart`：前者由已在运行的 daemon 自己拉起新进程，会继承旧环境，新设的变量传不进去。
+
+### 密钥的两种粒度
+
+| 方式 | 存放位置 | 适用 |
+|---|---|---|
+| 机器级 | `~/.mcodex/key` | 一台机器一个人，最简单 |
+| per-agent | multica agent 的 `custom_env` | 一台机器多人/多档位 |
+
+`custom_env` 优先于家目录密钥文件，两者可混用。按人下发：
 
 ```bash
 poolctl issue zhangsan --agent-id <agent-uuid>
 ```
 
-`custom_env` 里的密钥优先于 `~/.mcodex/key`，所以两种模式可以混用。
+`poolctl doctor` 会说明当前实际生效的是哪种。
 
 ### 运维
 
