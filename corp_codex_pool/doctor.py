@@ -84,15 +84,90 @@ def check_models_endpoint(base_url: str, timeout: float = 10.0) -> Check:
     return Check("网关 /models", OK, f"-> {response.status_code}")
 
 
+def detect_mode(config_path: Path | None = None) -> tuple[str, Path]:
+    """判断当前用的是哪种接入方式，返回 (模式名, 要检查的配置路径)。
+
+    两种方式互斥但可共存，优先报告 mcodex —— 它是推荐方式，
+    且不影响用户自己的 codex。
+    """
+    if config_path is not None:
+        return "指定路径", config_path
+
+    from .mcodex import mcodex_home
+
+    mcodex_config = mcodex_home() / "config.toml"
+    if mcodex_config.exists():
+        return "mcodex", mcodex_config
+    return "宿主注入", default_config_path()
+
+
+def check_mcodex_home(env_key: str) -> list[Check]:
+    """mcodex 模式特有的检查：密钥来源与 codex 路径固化。"""
+    import os
+
+    from .mcodex import KEY_FILENAME, REAL_CODEX_FILENAME, mcodex_home
+
+    home = mcodex_home()
+    if not (home / "config.toml").exists():
+        return []
+
+    checks = []
+
+    has_key_file = (home / KEY_FILENAME).exists()
+    has_key_env = bool(os.environ.get(env_key))
+    if has_key_file or has_key_env:
+        source = []
+        if has_key_env:
+            source.append(f"环境变量 {env_key}")
+        if has_key_file:
+            source.append(f"{home / KEY_FILENAME}")
+        checks.append(Check("mcodex 密钥", OK, "、".join(source)))
+    else:
+        checks.append(
+            Check(
+                "mcodex 密钥",
+                FAIL,
+                f"既无环境变量 {env_key}，{home / KEY_FILENAME} 也不存在",
+                "poolctl mcodex init --key-stdin",
+            )
+        )
+
+    pinned = home / REAL_CODEX_FILENAME
+    if pinned.exists():
+        target = pinned.read_text(encoding="utf-8").strip()
+        usable = Path(target).is_file() and os.access(target, os.X_OK)
+        checks.append(
+            Check(
+                "mcodex 固化的 codex",
+                OK if usable else FAIL,
+                target,
+                "记录的路径已失效，重新固定："
+                "poolctl mcodex init --real-codex <绝对路径>",
+            )
+        )
+    else:
+        checks.append(
+            Check(
+                "mcodex 固化的 codex",
+                WARN,
+                "未固化，运行时靠 PATH 现找",
+                "daemon 与登录 shell 的 PATH 常常不同，可能选到不同的 codex。"
+                "建议 poolctl mcodex init --real-codex <绝对路径>",
+            )
+        )
+
+    return checks
+
+
 def check_codex_config(
     provider_id: str,
     expected_base_url: str,
     env_key: str,
     path: Path | None = None,
 ) -> list[Check]:
-    """校验宿主 config.toml 的 provider 定义。"""
-    path = path or default_config_path()
-    checks: list[Check] = []
+    """校验 provider 定义。自动识别 mcodex 模式与宿主注入模式。"""
+    mode, path = detect_mode(path)
+    checks: list[Check] = [Check("接入方式", OK, f"{mode}（{path}）")]
 
     if not path.exists():
         return [
@@ -100,7 +175,8 @@ def check_codex_config(
                 "codex 配置文件",
                 FAIL,
                 f"不存在：{path}",
-                "运行 poolctl setup 注入 provider",
+                "用 mcodex：poolctl mcodex init --key-stdin\n"
+                "    或改宿主配置：poolctl setup",
             )
         ]
 
@@ -111,14 +187,16 @@ def check_codex_config(
 
     provider = (data.get("model_providers") or {}).get(provider_id)
     if not provider:
-        return [
+        checks.append(
             Check(
                 f"provider [{provider_id}]",
                 FAIL,
                 f"{path} 中找不到 model_providers.{provider_id}",
-                "运行 poolctl setup 注入",
+                "用 mcodex：poolctl mcodex init --key-stdin\n"
+                "    或改宿主配置：poolctl setup",
             )
-        ]
+        )
+        return checks
 
     checks.append(Check(f"provider [{provider_id}] 已注册", OK, str(path)))
 

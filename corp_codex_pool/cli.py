@@ -405,6 +405,7 @@ def doctor(ctx, key, config_path, as_json):
         *doctor_mod.check_codex_config(
             settings.provider_id, settings.pool_base_url, settings.env_key, config_path
         ),
+        *doctor_mod.check_mcodex_home(settings.env_key),
     ]
 
     if key:

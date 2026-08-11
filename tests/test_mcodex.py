@@ -321,3 +321,79 @@ class TestMcodexHome:
     def test_override(self, monkeypatch, tmp_path):
         monkeypatch.setenv("MCODEX_HOME", str(tmp_path))
         assert mcodex_home() == tmp_path
+
+
+class TestDoctorModeDetection:
+    """doctor 必须跟得上产品形态：mcodex 模式下别再去查 ~/.codex。"""
+
+    def test_detects_mcodex_when_home_exists(self, tmp_path, monkeypatch, spec):
+        from corp_codex_pool.doctor import detect_mode
+
+        home = tmp_path / "mhome"
+        init_home(home, spec)
+        monkeypatch.setenv("MCODEX_HOME", str(home))
+
+        mode, path = detect_mode()
+        assert mode == "mcodex"
+        assert path == home / "config.toml"
+
+    def test_falls_back_to_host_config(self, tmp_path, monkeypatch):
+        from corp_codex_pool.doctor import detect_mode
+
+        monkeypatch.setenv("MCODEX_HOME", str(tmp_path / "never-created"))
+        mode, path = detect_mode()
+        assert mode == "宿主注入"
+        assert path.name == "config.toml"
+
+    def test_explicit_path_wins(self, tmp_path, monkeypatch, spec):
+        from corp_codex_pool.doctor import detect_mode
+
+        home = tmp_path / "mhome"
+        init_home(home, spec)
+        monkeypatch.setenv("MCODEX_HOME", str(home))
+
+        explicit = tmp_path / "somewhere" / "config.toml"
+        mode, path = detect_mode(explicit)
+        assert mode == "指定路径"
+        assert path == explicit
+
+    def test_missing_key_is_flagged(self, tmp_path, monkeypatch, spec):
+        from corp_codex_pool.doctor import FAIL, check_mcodex_home
+
+        home = tmp_path / "mhome"
+        init_home(home, spec)  # 不给密钥
+        monkeypatch.setenv("MCODEX_HOME", str(home))
+
+        checks = check_mcodex_home("GW_API_KEY")
+        key_check = next(c for c in checks if c.name == "mcodex 密钥")
+        assert key_check.status == FAIL
+
+    def test_key_from_env_counts(self, tmp_path, monkeypatch, spec):
+        from corp_codex_pool.doctor import OK, check_mcodex_home
+
+        home = tmp_path / "mhome"
+        init_home(home, spec)
+        monkeypatch.setenv("MCODEX_HOME", str(home))
+        monkeypatch.setenv("GW_API_KEY", "sk-clb-x")
+
+        checks = check_mcodex_home("GW_API_KEY")
+        assert next(c for c in checks if c.name == "mcodex 密钥").status == OK
+
+    def test_stale_pin_is_flagged(self, tmp_path, monkeypatch, spec):
+        from corp_codex_pool.doctor import FAIL, check_mcodex_home
+
+        exe = _make_exe(tmp_path / "bin" / "codex")
+        home = tmp_path / "mhome"
+        init_home(home, spec, key="k", real_codex=str(exe))
+        monkeypatch.setenv("MCODEX_HOME", str(home))
+        exe.unlink()
+
+        checks = check_mcodex_home("GW_API_KEY")
+        pin = next(c for c in checks if c.name == "mcodex 固化的 codex")
+        assert pin.status == FAIL
+
+    def test_no_checks_when_mcodex_unused(self, tmp_path, monkeypatch):
+        from corp_codex_pool.doctor import check_mcodex_home
+
+        monkeypatch.setenv("MCODEX_HOME", str(tmp_path / "nope"))
+        assert check_mcodex_home("GW_API_KEY") == []
