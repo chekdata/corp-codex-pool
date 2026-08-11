@@ -423,14 +423,43 @@ def doctor(ctx, key, config_path, as_json):
             delivered = [
                 a for a in agents if settings.env_key in (mc.get_env(a["id"]) or {})
             ]
-            checks.append(
-                doctor_mod.Check(
-                    "已下发密钥的 agent",
-                    doctor_mod.OK if delivered else doctor_mod.WARN,
-                    f"{len(delivered)}/{len(agents)} 个 agent 带有 {settings.env_key}",
-                    "运行 poolctl issue <员工> --agent-id <id> 下发",
+
+            # 密钥有两个来源，任一成立即可：
+            #   per-agent  —— agent 的 custom_env，适合一台机器多人/多档位
+            #   机器级     —— mcodex 家目录的密钥文件，一台机器一把
+            # 只有两者都没有才是真问题。
+            from .mcodex import KEY_FILENAME, mcodex_home
+
+            machine_key = (mcodex_home() / KEY_FILENAME).exists()
+
+            if delivered:
+                checks.append(
+                    doctor_mod.Check(
+                        "agent 密钥来源",
+                        doctor_mod.OK,
+                        f"{len(delivered)}/{len(agents)} 个 agent 带有 {settings.env_key}"
+                        "（per-agent，优先于机器级密钥）",
+                    )
                 )
-            )
+            elif machine_key:
+                checks.append(
+                    doctor_mod.Check(
+                        "agent 密钥来源",
+                        doctor_mod.OK,
+                        f"未使用 custom_env，{len(agents)} 个 agent 统一走 mcodex 机器级密钥",
+                    )
+                )
+            else:
+                checks.append(
+                    doctor_mod.Check(
+                        "agent 密钥来源",
+                        doctor_mod.FAIL,
+                        f"{len(agents)} 个 agent 都没有 {settings.env_key}，"
+                        "mcodex 家目录也没有密钥文件",
+                        "机器级：poolctl mcodex init --key-stdin\n"
+                        "    或按人下发：poolctl issue <员工> --agent-id <id>",
+                    )
+                )
     except MulticaError as exc:
         checks.append(
             doctor_mod.Check("multica 连通", doctor_mod.WARN, str(exc), "运行 multica login")
@@ -518,6 +547,90 @@ def mcodex_init(ctx, key, key_stdin, inherit, home, real_codex):
             fg="yellow",
         )
     click.echo(f"\n你的 ~/.codex 未被改动。现在可以直接用：mcodex exec \"...\"")
+
+
+@main.group()
+def daemon():
+    """带号池配置启停 multica daemon。
+
+    multica 只能通过 MULTICA_CODEX_PATH 环境变量指定 codex 可执行文件，
+    它的 config.json 不支持这个键。直接 `multica daemon start` 拿不到这个
+    变量，daemon 就会退回系统 codex、绕开号池。
+
+    这组命令在启动前把变量设好，避免依赖 shell profile 或人工记忆。
+    """
+
+
+def _daemon_env(settings) -> dict[str, str]:
+    import os
+    import shutil as _shutil
+
+    found = _shutil.which("mcodex")
+    if not found:
+        _fail("PATH 里找不到 mcodex", "先 pip install -e .")
+    return {**os.environ, "MULTICA_CODEX_PATH": found}
+
+
+@daemon.command("start")
+@click.pass_context
+def daemon_start(ctx):
+    """带 MULTICA_CODEX_PATH 启动 daemon。"""
+    import subprocess
+
+    env = _daemon_env(_settings(ctx))
+    click.echo(f"MULTICA_CODEX_PATH = {env['MULTICA_CODEX_PATH']}")
+    result = subprocess.run(["multica", "daemon", "start"], env=env)
+    if result.returncode == 0:
+        click.secho("✓ daemon 已带号池配置启动", fg="green")
+        click.echo("  验证：multica daemon logs | grep 'agent version detected.*codex'")
+    sys.exit(result.returncode)
+
+
+@daemon.command("restart")
+@click.pass_context
+def daemon_restart(ctx):
+    """重启 daemon 并重新带上号池配置。
+
+    不用 `multica daemon restart`：那条命令由已在运行的 daemon 自己拉起
+    新进程，会继承旧进程的环境，我们新设的变量传不进去。
+    """
+    import subprocess
+
+    env = _daemon_env(_settings(ctx))
+    subprocess.run(["multica", "daemon", "stop"], env=env)
+    result = subprocess.run(["multica", "daemon", "start"], env=env)
+    if result.returncode == 0:
+        click.secho("✓ daemon 已重启并带上号池配置", fg="green")
+    sys.exit(result.returncode)
+
+
+@daemon.command("status")
+def daemon_status():
+    """显示 daemon 状态，并确认它用的是不是 mcodex。"""
+    import re
+    import subprocess
+
+    subprocess.run(["multica", "daemon", "status"])
+
+    log = Path.home() / ".multica" / "daemon.log"
+    if not log.exists():
+        return
+
+    # 取最后一次探测到的 codex 路径
+    pattern = re.compile(r"agent version detected.*name=codex.*path=(\S+)")
+    last = None
+    for line in log.read_text(encoding="utf-8", errors="replace").splitlines():
+        found = pattern.search(line)
+        if found:
+            last = found.group(1)
+
+    if last is None:
+        click.echo("\n尚未在日志中看到 codex 探测记录")
+    elif last.endswith("mcodex"):
+        click.secho(f"\n✓ daemon 使用的 codex：{last}（走号池）", fg="green")
+    else:
+        click.secho(f"\n! daemon 使用的 codex：{last}（未走号池）", fg="yellow")
+        click.echo("  用 poolctl daemon restart 让它改用 mcodex")
 
 
 @mcodex.command("path")

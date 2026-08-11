@@ -264,16 +264,31 @@ def check_codex_config(
     return checks
 
 
-def check_key_works(base_url: str, api_key: str, timeout: float = 60.0) -> Check:
+#: 探测用模型。实测上游各模型延迟差异很大（同一时段 gpt-5.5 要 180~400 秒，
+#: gpt-5.6-sol 只要 4~60 秒），所以默认挑快的那个，避免体检卡住。
+PROBE_MODEL = "gpt-5.6-sol"
+
+#: 上游偶发劣化时单次请求可能要几分钟，超时给宽些，
+#: 否则会把"上游慢"误报成"密钥不可用"。
+PROBE_TIMEOUT = 240.0
+
+
+def check_key_works(
+    base_url: str,
+    api_key: str,
+    timeout: float = PROBE_TIMEOUT,
+    model: str = PROBE_MODEL,
+) -> Check:
     """用真实密钥打一次最小请求，确认端到端可用。"""
     if not api_key:
         return Check("密钥可用性", SKIP, "未提供密钥")
 
     root = base_url.rstrip("/")
     payload = {
-        "model": "gpt-5.5",
+        "model": model,
         "input": [{"role": "user", "content": [{"type": "input_text", "text": "ping"}]}],
         "stream": False,
+        "max_output_tokens": 16,
     }
     try:
         response = httpx.post(
@@ -281,6 +296,17 @@ def check_key_works(base_url: str, api_key: str, timeout: float = 60.0) -> Check
             json=payload,
             headers={"Authorization": f"Bearer {api_key}"},
             timeout=timeout,
+        )
+    except httpx.ReadTimeout:
+        # 超时不代表密钥有问题：网关侧这类请求往往最终仍是 ok，
+        # 只是耗时超过了客户端等待。报成 WARN 并说清如何区分。
+        return Check(
+            "密钥可用性",
+            WARN,
+            f"{timeout:.0f} 秒内未返回（模型 {model}）",
+            "多半是上游延迟劣化而非密钥问题。"
+            "用 poolctl usage 看这条请求在网关侧是否最终成功（status=ok、latencyMs 很大），"
+            "若确实成功则可忽略",
         )
     except httpx.HTTPError as exc:
         return Check("密钥可用性", FAIL, f"请求失败：{exc}")
@@ -300,7 +326,7 @@ def check_key_works(base_url: str, api_key: str, timeout: float = 60.0) -> Check
     return Check("密钥可用性", OK, f"{response.status_code}，端到端通", data={"status": response.status_code})
 
 
-def check_quota_contract(base_url: str, api_key: str, timeout: float = 30.0) -> Check:
+def check_quota_contract(base_url: str, api_key: str, timeout: float = PROBE_TIMEOUT) -> Check:
     """校验超限响应契约。
 
     codex 对不同拒绝形式的重试放大差异极大：
@@ -320,7 +346,7 @@ def check_quota_contract(base_url: str, api_key: str, timeout: float = 30.0) -> 
         response = httpx.post(
             f"{root}/responses",
             json={
-                "model": "gpt-5.5",
+                "model": PROBE_MODEL,
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "ping"}]}],
                 "stream": False,
                 "max_output_tokens": 16,
@@ -360,7 +386,7 @@ def check_quota_contract(base_url: str, api_key: str, timeout: float = 30.0) -> 
     )
 
 
-def check_rate_limit_headers(base_url: str, api_key: str, timeout: float = 60.0) -> Check:
+def check_rate_limit_headers(base_url: str, api_key: str, timeout: float = PROBE_TIMEOUT) -> Check:
     """软预警头：codex 会解析成 RateLimitSnapshot 并对外广播。"""
     if not api_key:
         return Check("额度预警头", SKIP, "未提供密钥")
@@ -370,7 +396,7 @@ def check_rate_limit_headers(base_url: str, api_key: str, timeout: float = 60.0)
         response = httpx.post(
             f"{root}/responses",
             json={
-                "model": "gpt-5.5",
+                "model": PROBE_MODEL,
                 "input": [{"role": "user", "content": [{"type": "input_text", "text": "ping"}]}],
                 "stream": False,
             },
