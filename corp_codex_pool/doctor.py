@@ -266,12 +266,19 @@ def check_quota_contract(base_url: str, api_key: str, timeout: float = 30.0) -> 
         return Check("超限契约", FAIL, "429 但 body 不是 JSON", "必须返回 usage_limit_reached 结构")
 
     if error.get("type") == "usage_limit_reached":
-        return Check("超限契约", OK, "429 + usage_limit_reached，codex 只发 1 次请求")
+        return Check("超限契约", OK, "429 + usage_limit_reached，codex 只发 1 次请求，文案友好")
+
+    # 实测（codex-cli 0.147.0 + codex-lb）：429 配 rate_limit_error 时，
+    # codex 走 RetryLimit 分支——同样只发 1 次请求，不会放大，
+    # 但员工看到的是 "exceeded retry limit, last status: 429"，
+    # 会误以为是网络问题而不是额度耗尽。
     return Check(
         "超限契约",
         WARN,
-        f"429 但 error.type = {error.get('type')!r}",
-        "建议改为 usage_limit_reached，否则 codex 侧文案退化",
+        f"429 但 error.type = {error.get('type')!r}（非 usage_limit_reached）",
+        "不影响安全：实测 codex 仍只发 1 次请求，无重试放大。"
+        "但错误文案会退化成 “exceeded retry limit”，员工无法从中看出是额度用完，"
+        "需在员工须知里说明，或让网关改用 usage_limit_reached",
     )
 
 

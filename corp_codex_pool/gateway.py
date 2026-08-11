@@ -216,6 +216,83 @@ class GatewayClient:
         return []
 
 
+#: Responses API 的 request id 形如 `resp_<16 位会话标识><逐请求后缀>`。
+#: 同一会话的多次请求共享这 16 位。
+#:
+#: ⚠️ 这是实测逆向出来的规律，不是上游文档化的契约，可能随版本变化。
+#: 仅用于把请求聚成会话做展示与粗对账，不要用于计费或权限判断。
+#: 实测样本（codex-cli 0.147.0）：
+#:   multica task task-A 的 4 次请求 -> resp_aaaaaaaaaaaaaaaa…
+#:   multica task task-B 的 3 次请求 -> resp_bbbbbbbbbbbbbbbb…
+_SESSION_PREFIX_LEN = 16
+
+
+def session_key(row: dict[str, Any]) -> str | None:
+    """推断一条请求所属的会话。
+
+    优先用网关自己的 conversationId；它对 app-server 模式的请求为空
+    （codex 以 app-server 运行时不带该头），此时退回 requestId 前缀。
+    """
+    conversation = row.get("conversationId")
+    if conversation:
+        return str(conversation)
+
+    request_id = row.get("requestId")
+    if isinstance(request_id, str) and request_id.startswith("resp_"):
+        body = request_id[len("resp_"):]
+        if len(body) >= _SESSION_PREFIX_LEN:
+            return "resp_" + body[:_SESSION_PREFIX_LEN]
+    return None
+
+
+def summarize_by_session(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """按会话归集，用于看"一次任务花了多少"。
+
+    按首次请求时间倒序返回。
+    """
+    buckets: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = session_key(row)
+        if key is None:
+            continue
+        bucket = buckets.setdefault(
+            key,
+            {
+                "session": key,
+                "apiKeyName": row.get("apiKeyName"),
+                "requests": 0,
+                "inputTokens": 0,
+                "cachedInputTokens": 0,
+                "outputTokens": 0,
+                "costUsd": 0.0,
+                "firstAt": row.get("requestedAt"),
+                "lastAt": row.get("requestedAt"),
+                "models": set(),
+                "sourceIsApp": "multica" in str(row.get("useragent") or ""),
+            },
+        )
+        bucket["requests"] += 1
+        for field in ("inputTokens", "cachedInputTokens", "outputTokens"):
+            bucket[field] += row.get(field) or 0
+        bucket["costUsd"] += row.get("costUsd") or 0.0
+        if row.get("model"):
+            bucket["models"].add(row["model"])
+        stamp = row.get("requestedAt")
+        if stamp:
+            bucket["firstAt"] = min(bucket["firstAt"] or stamp, stamp)
+            bucket["lastAt"] = max(bucket["lastAt"] or stamp, stamp)
+
+    for bucket in buckets.values():
+        bucket["models"] = sorted(bucket.pop("models"))
+        bucket["costUsd"] = round(bucket["costUsd"], 6)
+        total = bucket["inputTokens"]
+        bucket["cacheHitRate"] = (
+            round(bucket["cachedInputTokens"] / total, 4) if total else None
+        )
+
+    return sorted(buckets.values(), key=lambda b: b["firstAt"] or "", reverse=True)
+
+
 def summarize_by_key(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """把请求日志按 apiKeyId 归集。
 

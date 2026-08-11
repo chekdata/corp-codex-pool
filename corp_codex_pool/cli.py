@@ -24,7 +24,13 @@ from .codex_config import (
     remove,
 )
 from .config import Settings
-from .gateway import AuthRequired, GatewayClient, GatewayError, summarize_by_key
+from .gateway import (
+    AuthRequired,
+    GatewayClient,
+    GatewayError,
+    summarize_by_key,
+    summarize_by_session,
+)
 from .multica import MulticaClient, MulticaError
 
 CONTEXT = {"help_option_names": ["-h", "--help"]}
@@ -189,6 +195,16 @@ def issue(
                 click.secho(f"✓ 已签发 {key_name}", fg="green")
                 click.echo(f"  id={key_id}  prefix={issued.key_prefix}")
                 click.secho(f"\n  密钥明文（只显示这一次）：{secret}\n", fg="cyan", bold=True)
+
+                if allowed_model:
+                    # 实测：命中白名单外的模型，网关返回 403 model_not_allowed，
+                    # 而 codex 对 403 会重试 6 次。请求都被拦在网关、不消耗上游额度，
+                    # 但会放大网关负载与错误日志，所以白名单要和员工实际用的模型对齐。
+                    click.secho(
+                        "  提示：白名单外的模型会被网关 403 拒绝，而 codex 对 403 会重试 6 次。\n"
+                        "  请确认白名单覆盖了员工日常使用的模型，避免无谓的重试放大。",
+                        fg="yellow",
+                    )
     except AuthRequired as exc:
         _fail(str(exc), "在 .env 设置 POOL_ADMIN_PASSWORD")
         return
@@ -292,9 +308,10 @@ def revoke(ctx, person, agent_id, workspace_id, yes):
 @click.option("--since", help="起始时间，ISO8601")
 @click.option("--until", help="结束时间，ISO8601")
 @click.option("--max-records", type=int, default=5000, show_default=True)
+@click.option("--by-session", is_flag=True, help="按会话归集，看单次任务花了多少")
 @click.option("--json", "as_json", is_flag=True, help="输出 JSON")
 @click.pass_context
-def usage(ctx, since, until, max_records, as_json):
+def usage(ctx, since, until, max_records, by_session, as_json):
     """按人汇总用量。归属依据是密钥，密钥由 poolctl issue 与员工绑定。"""
     settings = _settings(ctx)
     try:
@@ -303,6 +320,10 @@ def usage(ctx, since, until, max_records, as_json):
             rows = gw.request_logs(since=since, until=until, max_records=max_records)
     except GatewayError as exc:
         _fail(f"拉取用量失败：{exc}")
+        return
+
+    if by_session:
+        _print_sessions(rows, as_json)
         return
 
     summary = summarize_by_key(rows)
@@ -332,6 +353,40 @@ def usage(ctx, since, until, max_records, as_json):
     total = sum(b["costUsd"] for b in summary.values())
     click.echo("-" * len(header))
     click.echo(f"{'合计':<28}{len(rows):>6}{'':>12}{'':>12}{'':>10}{'':>9}{total:>11.4f}")
+
+
+def _print_sessions(rows, as_json: bool) -> None:
+    sessions = summarize_by_session(rows)
+
+    if as_json:
+        click.echo(jsonlib.dumps(sessions, ensure_ascii=False, indent=2))
+        return
+
+    if not sessions:
+        click.echo("没有可归集的会话")
+        return
+
+    click.echo(f"共 {len(sessions)} 个会话：\n")
+    header = f"{'开始时间':<20}{'来源':<8}{'密钥':<20}{'请求':>5}{'输入':>11}{'命中率':>8}{'成本USD':>10}"
+    click.echo(header)
+    click.echo("-" * len(header))
+
+    for item in sessions[:40]:
+        rate = f"{item['cacheHitRate']:.1%}" if item["cacheHitRate"] is not None else "—"
+        source = "multica" if item["sourceIsApp"] else "手动"
+        click.echo(
+            f"{(item['firstAt'] or '')[:19]:<20}{source:<8}"
+            f"{(item['apiKeyName'] or '(未归属)'):<20}{item['requests']:>5}"
+            f"{item['inputTokens']:>11,}{rate:>8}{item['costUsd']:>10.4f}"
+        )
+
+    if len(sessions) > 40:
+        click.echo(f"… 另有 {len(sessions) - 40} 个会话未显示（用 --json 获取全部）")
+
+    click.echo(
+        "\n注：会话标识优先取网关的 conversationId；app-server 模式下该字段为空，"
+        "退回按 requestId 前缀分组（实测规律，非上游契约）。"
+    )
 
 
 # ---------------------------------------------------------------- doctor

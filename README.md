@@ -155,15 +155,23 @@ pool-lisi                       14      75,818           0       127     0.0%   
 
 **网关必须实现 Responses API。** codex 已经移除了 `wire_api = "chat"`，只接受 `"responses"`。只做 chat/completions 兼容的网关接不上。
 
-**超限必须返回 429 + `usage_limit_reached`。** codex 有双层重试，拒绝形式直接决定请求放大倍数：
+**拒绝形式直接决定请求放大倍数。** codex 有双层重试：
 
 | 拒绝形式 | 实际请求数 |
 |---|---|
 | 429 + `{"error":{"type":"usage_limit_reached"}}` | 1 |
+| 429 + 其它 body | 1（文案退化） |
 | 402 / 403 / 401 / 404 | 6 |
 | 5xx | 最多 30 |
 
 用 5xx 表达配额等于自己打爆自己。
+
+两条实测出来的现状（详见 [`docs/实测记录.md`](docs/实测记录.md)）：
+
+- codex-lb 超限返回的是 `type: "rate_limit_error"` 而非 `usage_limit_reached`。**不会重试放大**，但员工看到的是 `exceeded retry limit, last status: 429`，看不出是额度用完。`poolctl doctor` 会检出这一点。
+- 模型白名单用 403 拦截，**会触发 6 次重试**。白名单要覆盖员工日常使用的模型。
+
+**对账只能到人，到不了任务。** codex 确实会把 `x-multica-task-id` 等头发出去（已用回显服务实证），但 codex-lb 不记录任何自定义请求头。按人计量走密钥归属，完全可行；task 级精确对账需要网关侧改造。`poolctl usage --by-session` 提供基于 requestId 前缀的会话级归集作为折中。
 
 **密钥对 agent 的 shell 可见。** `custom_env` 里的键会进 codex 的 `shell_environment_policy.include_only`，agent 自己跑 `env` 能看到号池密钥。号池密钥只是入场券——泄露后果限于该员工额度，且可即时吊销。若安全评审不接受，需要改 multica 上游改走 daemon 侧 `agentEnv`（含 `KEY` 的变量会被排除出 `include_only`，但主进程仍拿得到）。
 
