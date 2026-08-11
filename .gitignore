@@ -1,0 +1,28 @@
+# 凭据：绝不入库
+.env
+*.env
+!.env.example
+secrets*.txt
+*.key
+*-key
+*.pem
+auth.json
+.e2e-*
+
+# 运行产物
+*.db
+*.sqlite
+state/
+out/
+logs/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+build/
+dist/
