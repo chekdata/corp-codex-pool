@@ -48,7 +48,7 @@ class ProviderSpec:
 
     provider_id: str = "gw"
     name: str = "Company Codex Pool"
-    base_url: str = "http://127.0.0.1:2455/v1"
+    base_url: str = "https://codex.chekkk.com/v1"
     env_key: str = "GW_API_KEY"
     env_key_instructions: str = "由号池控制台下发，请勿手工设置"
     # wire_api 只接受 "responses"："chat" 已从 codex 移除

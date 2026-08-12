@@ -130,7 +130,7 @@ sequenceDiagram
 需要 **Python 3.11+**（用到标准库 `tomllib`）。
 
 ```bash
-git clone https://github.com/david1996yong-design/corp-codex-pool.git
+git clone https://github.com/chekdata/corp-codex-pool.git
 cd corp-codex-pool
 pip install -e .
 ```
@@ -149,6 +149,16 @@ pip install -e .
 | multica | 可选。只在需要让 multica agent 走号池时用 |
 
 > ⚠️ **网关必须支持 Responses API。** codex 已经移除了 `wire_api = "chat"`，只接受 `"responses"`。只做 chat/completions 兼容的网关**接不上**。
+
+### CHEK 正式维护方式
+
+CHEK 内部正式方案按三层维护：
+
+- `chekdata/codex-lb`：正式托管号池网关源码、CI 与镜像
+- `chekdata/corp-codex-pool`：正式托管员工侧 `poolctl` / `mcodex`
+- `chekdata/ops-bootstrap`：正式托管 prod ArgoCD 发布清单
+
+也就是说，**以后功能开发都在 CHEK 自己的 fork 上做**，不再直接改 upstream 仓库；上线镜像和 prod 发布也都走 CHEK 自己的仓库与流水线。
 
 ---
 
@@ -332,10 +342,10 @@ multica 只能通过 `MULTICA_CODEX_PATH` 环境变量指定 codex 路径（它�
 
 | 变量 | 默认 | 说明 |
 |---|---|---|
-| `POOL_ADMIN_URL` | `http://127.0.0.1:2455` | 网关管理面地址 |
+| `POOL_ADMIN_URL` | `https://pool.chekkk.com` | 网关管理面地址（给 `poolctl` 这类管理流量直连 `codex-lb`） |
 | `POOL_ADMIN_PASSWORD` | — | 管理面密码。codex-lb 用 cookie session 登录 |
 | `POOL_ADMIN_TOKEN` | — | 预留，当前管理面不接受 Bearer |
-| `POOL_BASE_URL` | `http://127.0.0.1:2455/v1` | 员工侧 codex 访问的网关地址。**必须是 daemon 宿主机可达的地址**，全员铺开时换成内网域名 |
+| `POOL_BASE_URL` | `https://codex.chekkk.com/v1` | 员工侧 codex 访问的网关地址。**必须是 daemon 宿主机可达的地址** |
 | `MULTICA_SERVER_URL` | `https://api.multica.ai` | 自托管填自己的地址 |
 | `MULTICA_TOKEN` | — | 不填则读 `~/.multica/config.json` |
 | `POOL_PROVIDER_ID` | `gw` | 出现在 `[model_providers.<id>]` |
@@ -357,7 +367,7 @@ model_provider = "gw"
 
 [model_providers.gw]
 name = "Company Codex Pool"
-base_url = "http://127.0.0.1:2455/v1"
+base_url = "https://codex.chekkk.com/v1"
 wire_api = "responses"
 env_key = "GW_API_KEY"
 env_key_instructions = "由号池控制台下发，请勿手工设置"
@@ -673,6 +683,10 @@ docs/
 **Q: 支持自托管 multica 吗？**
 
 支持，改 `MULTICA_SERVER_URL` 即可。本项目对云端和自托管没有区别对待。
+
+**Q: 以后功能更新在哪个仓库做？**
+
+在 `chekdata/corp-codex-pool` 做。若网关能力也要变更，则同步改 `chekdata/codex-lb`，然后由 `chekdata/ops-bootstrap` 发到 prod。
 
 **Q: 为什么我的请求要几分钟？**
 

@@ -25,10 +25,10 @@ def load_dotenv(path: Path | None = None) -> dict[str, str]:
 
 @dataclass
 class Settings:
-    pool_admin_url: str = "http://127.0.0.1:2455"
+    pool_admin_url: str = "https://pool.chekkk.com"
     pool_admin_token: str = ""
     pool_admin_password: str = ""
-    pool_base_url: str = "http://127.0.0.1:2455/v1"
+    pool_base_url: str = "https://codex.chekkk.com/v1"
     multica_server_url: str = "https://api.multica.ai"
     multica_token: str = ""
     provider_id: str = "gw"
