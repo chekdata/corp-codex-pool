@@ -101,7 +101,7 @@ def detect_mode(config_path: Path | None = None) -> tuple[str, Path]:
     return "宿主注入", default_config_path()
 
 
-def check_mcodex_home(env_key: str) -> list[Check]:
+def check_mcodex_home(env_key: str, session_url: str | None = None) -> list[Check]:
     """mcodex 模式特有的检查：密钥来源与 codex 路径固化。"""
     import os
 
@@ -115,7 +115,12 @@ def check_mcodex_home(env_key: str) -> list[Check]:
 
     has_key_file = (home / KEY_FILENAME).exists()
     has_key_env = bool(os.environ.get(env_key))
-    if has_key_file or has_key_env:
+    if session_url:
+        detail = f"任务启动时从 {session_url} 自动签发；不写磁盘"
+        if has_key_file or has_key_env:
+            detail += "（检测到旧静态密钥，但任务模式会忽略）"
+        checks.append(Check("mcodex 任务绑定凭证", OK, detail))
+    elif has_key_file or has_key_env:
         source = []
         if has_key_env:
             source.append(f"环境变量 {env_key}")

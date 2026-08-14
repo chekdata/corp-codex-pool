@@ -1,8 +1,8 @@
 # corp-codex-pool
 
-把多个 Codex 订阅变成一个内部号池，按人发密钥、按人计量，并让 [multica](https://github.com/multica-ai/multica) 拉起的 codex 自动走这个号池。
+把多个 Codex 订阅变成一个内部号池，让 [Multica](https://github.com/multica-ai/multica) 任务按人、按任务使用和审计公司额度。
 
-**不改 multica 一行代码，不改 codex 一行代码，也不碰你自己的 `codex`。**
+**CHEK 正式环境不向员工分发永久 Key，只允许 Multica 任务中的 `mcodex` 申请短时、任务绑定凭证；你自己的 `codex` 不受影响。**
 
 ```
 codex   →  provider: openai  →  你的个人订阅
@@ -48,10 +48,10 @@ mcodex  →  provider: gw      →  公司号池网关  →  Pro 账号 A / B / 
 | 能力 | 只有网关 | 只有 multica | 接上之后 |
 |---|---|---|---|
 | 多个订阅共享 | 有 | 无 | 有 |
-| 按人计量 | 做不到（只看得见密钥） | 无请求级用量 | 密钥即人，可归集 |
+| 按人/任务计量 | 做不到（只看得见密钥） | 无请求级用量 | 临时 Key 名绑定用户与任务，可归集 |
 | 超额硬拦截 | 可做 | 物理上做不到<sup>1</sup> | 网关拦截 |
-| 员工无需登录 | — | — | 密钥由服务端下发 |
-| 离职即时回收 | — | — | 吊销密钥，0.06 秒生效 |
+| 员工无需管理 Key | — | — | 任务启动时自动签发，不落盘 |
+| 防止脱离公司任务使用 | 无 | 有任务上下文 | 缺任务票或上下文不匹配即拒绝 |
 
 <sup>1</sup> multica 的用量只在任务结束后上报一次，跑到一半发现超额没法掐断。
 
@@ -65,7 +65,6 @@ mcodex  →  provider: gw      →  公司号池网关  →  Pro 账号 A / B / 
 ### 不适用
 
 - 只有一个人用 —— 直接用 codex 就好
-- 需要精确到"每个任务花了多少" —— 见[已知限制](#已知限制)
 - 想绕过订阅条款做转售 —— 本项目是给企业内部分发自购订阅用的
 
 ---
@@ -87,11 +86,7 @@ flowchart LR
     G -.per-request 计量.-> DB[(用量表)]
 ```
 
-它覆盖两种运行场景：
-
-**你直接敲 `mcodex`** — 环境里没有 `CODEX_HOME`，就设成 `~/.mcodex`（那里有号池 provider 配置和密钥），然后 exec codex。
-
-**multica daemon 拉起** — daemon 会把 `CODEX_HOME` 指向 per-task 目录，并从 `~/.codex/config.toml` 拷一份配置进去。既然宿主那份不含号池 provider，`mcodex` 就在 exec 前把 provider 注入这份 per-task 配置。daemon 准备完就不再动它，所以这个时机是安全的，且每个任务都是新目录。
+CHEK 正式环境只覆盖一种运行场景：**Multica daemon 拉起**。daemon 把 `CODEX_HOME` 和 `mat_` 任务票据注入进程，`mcodex` 用任务票向生产桥接层换取两小时有效的 `mcx_` 凭证，再 exec 真 Codex。直接在终端运行 `mcodex` 因缺少任务上下文会失败。
 
 ### 依赖的三个上游机制
 
@@ -99,9 +94,9 @@ flowchart LR
 
 | 机制 | 作用 |
 |---|---|
-| codex 自定义 provider 的 `env_key` 从环境变量读密钥，且**优先于 `auth.json`** | 每人一把密钥，不用分发账号；有 `env_key` 时**不需要 `codex login`** |
+| codex 自定义 provider 的 `env_key` 从环境变量读密钥，且**优先于 `auth.json`** | 本次任务注入临时凭证；不需要 `codex login` |
 | multica daemon 支持 `MULTICA_CODEX_PATH` 指定 codex 可执行文件 | 不改 multica 就能换成 `mcodex` |
-| multica 的 `custom_env` 会被 daemon 铺到 codex 子进程环境，且不拦自定义变量名 | 密钥可按人下发到各自的 agent |
+| Multica 的 `mat_` 任务票在服务端绑定用户、Agent、任务和 Workspace | 网关不信任客户端自报身份，只接受服务端证明 |
 
 ### 密钥注入时序
 
@@ -115,7 +110,9 @@ sequenceDiagram
     D->>D: 准备 per-task CODEX_HOME<br/>拷贝宿主 config.toml
     D->>M: exec mcodex app-server --listen stdio://<br/>env: CODEX_HOME, MULTICA_TASK_ID…
     M->>M: 往 per-task config.toml 注入 [model_providers.gw]
-    M->>M: 从 ~/.mcodex/key 读密钥<br/>（custom_env 已有则不覆盖）
+    M->>G: 用 mat_ 任务票申请短时凭证
+    G->>S: 校验服务端绑定的用户/Agent/任务/Workspace
+    G-->>M: 返回加密 mcx_ 凭证（不含可见原始 Key）
     M->>C: execvp（argv 与 stdio 原样透传）
     C->>G: POST /v1/responses<br/>Authorization: Bearer GW_API_KEY
     G->>G: 按密钥鉴权 + 配额检查 + 路由到某个账号
@@ -146,14 +143,15 @@ pip install -e .
 |---|---|
 | [codex CLI](https://github.com/openai/codex) | 已安装。`mcodex` 会 exec 它 |
 | 号池网关 | 必须实现 **Responses API**（`POST /v1/responses`）。本项目针对 [codex-lb](https://github.com/Soju06/codex-lb) 开发与验证 |
-| multica | 可选。只在需要让 multica agent 走号池时用 |
+| Multica | CHEK 正式环境必需；员工先登录并在本机运行 daemon |
 
 > ⚠️ **网关必须支持 Responses API。** codex 已经移除了 `wire_api = "chat"`，只接受 `"responses"`。只做 chat/completions 兼容的网关**接不上**。
 
 ### CHEK 正式维护方式
 
-CHEK 内部正式方案按三层维护：
+CHEK 内部正式方案按四层维护：
 
+- `chekdata/multica`：提供任务票据的服务端绑定证明
 - `chekdata/codex-lb`：正式托管号池网关源码、CI 与镜像
 - `chekdata/corp-codex-pool`：正式托管员工侧 `poolctl` / `mcodex`
 - `chekdata/ops-bootstrap`：正式托管 prod ArgoCD 发布清单
@@ -164,41 +162,18 @@ CHEK 内部正式方案按三层维护：
 
 ## 快速开始
 
-### 管理员：签发密钥
+### 员工：一次性接入
 
 ```bash
-cp .env.example .env      # 填写网关地址与管理面密码
-poolctl status            # 确认能连上网关
-
-poolctl issue zhangsan --weekly-token-limit 20000000
+multica login
+poolctl enroll
 ```
 
-密钥明文**只在签发时显示一次**，之后只能看到前缀。记下来发给员工。
+`poolctl enroll` 会初始化独立的 `~/.mcodex`、清理旧永久 Key，并用 `mcodex` 重启 Multica daemon。之后员工只需在 `multica.chekkk.com` 创建任务，不需要看见、粘贴或保存 API Key。
 
-### 员工：本机初始化
+### 使用
 
-```bash
-poolctl mcodex init --key-stdin
-# 粘贴密钥，回车，Ctrl-D
-```
-
-之后把 `codex` 换成 `mcodex`：
-
-```bash
-mcodex
-mcodex exec "重构这个模块"
-```
-
-`mcodex init` 默认从 `~/.codex/config.toml` 继承使用偏好（模型、推理强度、已信任目录），手感和平时一致。**只继承偏好，不复制任何凭据。**
-
-### 让 multica 走号池
-
-```bash
-poolctl daemon restart    # 带上 MULTICA_CODEX_PATH 启动
-poolctl daemon status     # 确认它用的确实是 mcodex
-```
-
-输出应包含：
+在 Multica 中创建/继续一个 Codex 任务。任务的每轮消息、工具结果和状态由 Multica 原生任务窗口保存；网关按临时 Key 记录模型、token、成本和延迟。脱离 Multica 直接运行 `mcodex` 会被拒绝。可用 `poolctl daemon status` 验证运行入口，输出应包含：
 
 ```
 ✓ daemon 使用的 codex：/…/mcodex（走号池）
@@ -207,16 +182,26 @@ poolctl daemon status     # 确认它用的确实是 mcodex
 ### 验证
 
 ```bash
-poolctl doctor --key sk-clb-...
+poolctl doctor
 ```
 
-13+ 项检查，覆盖网关连通性、配置正确性、密钥有效性、超限契约。每个失败项都带可执行的下一步。
+检查覆盖网关连通性、配置、任务绑定凭证模式和 Multica 登录状态。每个失败项都带可执行的下一步。
 
 ---
 
 ## 命令参考
 
+### `poolctl enroll` — 员工一键接入
+
+```bash
+poolctl enroll [--no-inherit] [--real-codex <path>] [--no-restart-daemon]
+```
+
+不接收 Key。它只准备 `mcodex` 并确保 daemon 通过该入口启动；凭证在每个任务开始时自动签发。
+
 ### `poolctl issue` — 签发密钥
+
+这是兼容私有/手工部署的管理员命令。CHEK prod 员工路径不使用它，也不向员工下发其结果。
 
 ```bash
 poolctl issue <员工标识> [选项]
@@ -304,6 +289,8 @@ poolctl unsetup [--dry-run]
 
 ### `poolctl mcodex init` — 初始化员工端
 
+底层初始化命令；CHEK prod 员工优先使用 `poolctl enroll`。`--key` 选项仅保留给私有/手工部署。
+
 ```bash
 poolctl mcodex init [--key <明文> | --key-stdin] [--inherit/--no-inherit]
                     [--home <path>] [--real-codex <path>]
@@ -346,6 +333,7 @@ multica 只能通过 `MULTICA_CODEX_PATH` 环境变量指定 codex 路径（它�
 | `POOL_ADMIN_PASSWORD` | — | 管理面密码。codex-lb 用 cookie session 登录 |
 | `POOL_ADMIN_TOKEN` | — | 预留，当前管理面不接受 Bearer |
 | `POOL_BASE_URL` | `https://codex.chekkk.com/v1` | 员工侧 codex 访问的网关地址。**必须是 daemon 宿主机可达的地址** |
+| `POOL_SESSION_URL` | `https://codex.chekkk.com/api/self-service/session-key` | Multica 任务票换取短时号池凭证的地址 |
 | `MULTICA_SERVER_URL` | `https://api.multica.ai` | 自托管填自己的地址 |
 | `MULTICA_TOKEN` | — | 不填则读 `~/.multica/config.json` |
 | `POOL_PROVIDER_ID` | `gw` | 出现在 `[model_providers.<id>]` |
@@ -355,7 +343,7 @@ multica 只能通过 `MULTICA_CODEX_PATH` 环境变量指定 codex 路径（它�
 
 | 变量 | 说明 |
 |---|---|
-| `GW_API_KEY` | 号池密钥。优先于 `~/.mcodex/key` |
+| `GW_API_KEY` | 仅在 Codex 进程内存在的 `mcx_` 任务绑定凭证；正式模式不持久化 |
 | `MCODEX_HOME` | 覆盖默认家目录 `~/.mcodex` |
 | `MCODEX_REAL_CODEX` | 临时覆盖真 codex 路径，便于排障与灰度 |
 
@@ -385,11 +373,11 @@ env_key_instructions = "由号池控制台下发，请勿手工设置"
 
 ## 两种接入方式
 
-| | `mcodex`（推荐） | `poolctl setup` |
+| | `mcodex`（CHEK prod） | `poolctl setup`（仅私有/手工部署） |
 |---|---|---|
 | 配置位置 | `~/.mcodex/config.toml` | `~/.codex/config.toml` |
 | 影响你自己的 `codex` | **不影响** | 会一起走号池 |
-| 未设密钥时 | 只有 `mcodex` 报错 | **`codex` 直接报错** |
+| 凭证 | Multica 任务内自动签发 | 需要手工永久 Key |
 | multica 接入 | 设 `MULTICA_CODEX_PATH` | 无需额外设置 |
 | 命令 | `mcodex` | `codex` 照旧 |
 
@@ -399,7 +387,7 @@ env_key_instructions = "由号池控制台下发，请勿手工设置"
 ERROR failed to refresh available models: Missing environment variable: `GW_API_KEY`
 ```
 
-除非确实想让整台机器都走号池，否则用 `mcodex`。
+CHEK prod 强制使用 `mcodex`；`setup` 不能绕过生产桥接层的任务绑定校验。
 
 `poolctl doctor` 会自动识别当前用的是哪种，并在报告里标注。
 
@@ -407,39 +395,32 @@ ERROR failed to refresh available models: Missing environment variable: `GW_API_
 
 ## 密钥管理
 
-### 两种粒度
+### 正式模式
 
-| 方式 | 存放位置 | 适用 |
-|---|---|---|
-| 机器级 | `~/.mcodex/key`（权限 600） | 一台机器一个人，最简单 |
-| per-agent | multica agent 的 `custom_env` | 一台机器多人 / 多档位 |
-
-`custom_env` 优先于家目录密钥文件，两者可混用。`poolctl doctor` 会说明当前实际生效的是哪种。
+员工侧不保存原始 `sk-clb` Key，也不把 Key 写入 Agent `custom_env`。桥接层为每个任务创建有有效期和 token 上限的原始 Key，再把它加密封装为绑定用户、Agent、任务和 Workspace 的 `mcx_` 凭证。每次 API 请求都会解封并核对三元组后才转发。
 
 ### 生命周期
 
 ```
-签发 (poolctl issue)
-  → 明文只显示一次
-  → 下发到员工机器 (mcodex init) 或 agent (deliver)
-  → 使用中：网关按密钥记账
-  → 吊销 (poolctl revoke)：0.06 秒生效
+Multica 创建任务 → daemon 注入 mat_ 任务票
+  → mcodex 自动换取短时 mcx_ 凭证（不落盘）
+  → 网关逐请求核对任务上下文并记账
+  → 任务票完成即回收；mcx_ 与底层 Key 最晚按 TTL 失效
 ```
 
 ### 安全须知
 
-- **密钥在员工机器上是明文存放的**（`~/.mcodex/key`，权限 600）。
-- **走 `custom_env` 时对 agent 的 shell 可见** —— `custom_env` 里的键会进 codex 的 `shell_environment_policy.include_only`，agent 自己跑 `env` 能看到。
-- 号池密钥只是入场券：泄露后果限于该员工额度，且可即时吊销。若安全评审不接受，需要改 multica 上游走 daemon 侧 `agentEnv`（含 `KEY` 的变量会被排除出 `include_only`，但 codex 主进程仍拿得到）。
-- **号池 agent 一律设为 private。** multica 的 `agent_runtime.visibility` 若为 `public`，工作区任何成员派的活都会跑在这个 owner 的号上，"一人一密钥"会退化成"一机一密钥"。
+- 原始网关 Key 只存在于生产桥接层和 codex-lb 之间，员工拿到的是加密、限时、任务绑定凭证。
+- `mcodex` 在 daemon 配置完 shell 环境白名单后才注入凭证，Agent 的 shell 工具不会继承 `GW_API_KEY`。
+- 操作系统账户所有者仍可能调试自身进程；因此本方案提供强归因、短 TTL 和审计，而不是声称能抵抗已控制员工电脑的恶意管理员。
 
 ---
 
 ## 用量与计量
 
-### 归属依据是密钥
+### 归属依据是任务 Key
 
-一把密钥对应一个员工，映射关系由 `poolctl issue` 建立。网关按密钥记录每次请求的模型、token 数、成本、延迟。
+一把短时 Key 对应一个 Multica 用户和任务，名称包含用户/任务短 ID。网关按 Key 记录每次请求的模型、token 数、成本、延迟，Multica 保存同一任务的完整对话窗口。
 
 ### 采集了什么
 
@@ -447,11 +428,11 @@ ERROR failed to refresh available models: Missing environment variable: `GW_API_
 |---|---|
 | 请求数、token 数（输入/缓存/输出/推理） | 提示词内容 |
 | 模型、成本、延迟 | 代码内容 |
-| 时间戳、账号归属 | 对话历史 |
+| 时间戳、用户/任务归属 | 提示词和回复正文的网关副本 |
 
 ### 对账粒度
 
-**能到人，到不了任务。** 详见[已知限制](#对账只能到人到不了任务)。
+**可以到人和任务。** 任务 Key 名与网关日志负责成本归集，Multica task id 负责打开对应对话窗口；网关不额外复制对话正文。
 
 `poolctl usage --by-session` 提供会话级归集作为折中，基于同一会话的请求共享 `requestId` 前 16 位这个**实测规律**（非上游契约，可能随版本变化）。
 
@@ -536,13 +517,9 @@ ss -tnp | grep <网关端口>
 
 ## 已知限制
 
-### 对账只能到人，到不了任务
+### 对话不在网关重复落库
 
-codex **确实会**把 `x-multica-task-id` 等头发出去（已用回显服务实证），但 codex-lb 的 `RequestLogEntry` **不记录任何自定义请求头**。
-
-同时 multica 的 `session_id` 与网关的 `conversationId` 无一命中 —— app-server 模式下后者恒为空。
-
-所以 task 级精确对账需要网关侧改造。`env_http_headers` 照配不误（无害，且网关将来支持时即可用），但不要指望现在就能用。
+完整提示词、回复和工具轨迹由 Multica 原生任务窗口保存；codex-lb 仅保存请求级用量。任务 Key 名提供两边的对账键。这避免在第二套系统复制敏感正文，但也意味着网关控制台本身不能展示对话内容。
 
 ### 超限请求不进请求日志
 
@@ -554,9 +531,9 @@ codex **确实会**把 `x-multica-task-id` 等头发出去（已用回显服务�
 
 多账号池化后，如果会话没有粘到同一个账号，提示词缓存会失效，成本优势会显著缩水。**加第二个账号后必须重测。**
 
-### 密钥对 agent 可见
+### 本机所有者边界
 
-见[安全须知](#安全须知)。
+凭证不会进入 Agent shell，但掌控员工操作系统账户的人仍可能检查 Codex 进程。短 TTL、任务绑定和审计用于缩小风险窗口，不能替代终端安全管理。
 
 ### 版本绑定
 
@@ -628,7 +605,7 @@ multica 的用量写入是 REPLACE 语义，会与 agent 自报互相覆盖；�
 
 ```bash
 pip install -e ".[dev]"
-pytest              # 65 个测试
+pytest              # 71 个测试
 ```
 
 测试重点覆盖：
@@ -636,7 +613,7 @@ pytest              # 65 个测试
 - TOML 注入的语义正确性与幂等性（顶层键陷阱、marker 块共存、反复注入稳定）
 - 与用户 `~/.codex` 的隔离性（不改源文件、不复制凭据）
 - codex 路径解析优先级（固化 > 环境变量 > PATH，软链不跟随）
-- daemon 场景下不覆盖 `CODEX_HOME`、不覆盖已有密钥
+- daemon 场景下不覆盖 `CODEX_HOME`，并强制用任务票换取临时凭证
 - doctor 的模式识别
 
 ### 项目结构
@@ -668,17 +645,17 @@ docs/
 
 不需要，也不需要 `codex login`。有 `env_key` 时 codex 不走 first-party auth 路径。
 
-**Q: 密钥丢了怎么办？**
+**Q: 员工需要申请或保存密钥吗？**
 
-明文只在签发时显示一次。丢了就 `poolctl revoke` 再重新 `issue`。
+不需要。`mcodex` 在每个 Multica 任务启动时自动申请，凭证不写磁盘；失败时重新创建/重试任务即可。
 
 **Q: 能限制员工只用某几个模型吗？**
 
 能，`--allowed-model`。注意白名单外的模型会触发 codex 重试 6 次。
 
-**Q: 支持飞书 / OIDC 登录吗？**
+**Q: 支持飞连 / OIDC 登录吗？**
 
-不支持。multica 只有邮箱验证码和 Google 两种登录方式，没有 OIDC/SAML 抽象。要做需要自己写。
+CHEK prod 已通过 `multica.chekkk.com` 前置飞连 OIDC 单点登录；任务票据仍由 Multica 服务端签发。
 
 **Q: 支持自托管 multica 吗？**
 
@@ -686,7 +663,7 @@ docs/
 
 **Q: 以后功能更新在哪个仓库做？**
 
-在 `chekdata/corp-codex-pool` 做。若网关能力也要变更，则同步改 `chekdata/codex-lb`，然后由 `chekdata/ops-bootstrap` 发到 prod。
+员工端在 `chekdata/corp-codex-pool`，任务身份契约在 `chekdata/multica`，网关能力在 `chekdata/codex-lb`，生产策略和 ArgoCD 发布在 `chekdata/ops-bootstrap`。
 
 **Q: 为什么我的请求要几分钟？**
 

@@ -29,6 +29,7 @@ class Settings:
     pool_admin_token: str = ""
     pool_admin_password: str = ""
     pool_base_url: str = "https://codex.chekkk.com/v1"
+    pool_session_url: str = "https://codex.chekkk.com/api/self-service/session-key"
     multica_server_url: str = "https://api.multica.ai"
     multica_token: str = ""
     provider_id: str = "gw"
@@ -46,6 +47,7 @@ class Settings:
             pool_admin_token=get("POOL_ADMIN_TOKEN", ""),
             pool_admin_password=get("POOL_ADMIN_PASSWORD", ""),
             pool_base_url=get("POOL_BASE_URL", cls.pool_base_url).rstrip("/"),
+            pool_session_url=get("POOL_SESSION_URL", cls.pool_session_url).rstrip("/"),
             multica_server_url=get("MULTICA_SERVER_URL", cls.multica_server_url).rstrip("/"),
             multica_token=get("MULTICA_TOKEN", ""),
             provider_id=get("POOL_PROVIDER_ID", cls.provider_id),

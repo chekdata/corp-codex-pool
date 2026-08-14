@@ -24,6 +24,8 @@ import os
 import sys
 from pathlib import Path
 
+import httpx
+
 from .codex_config import ProviderSpec, inject
 
 #: mcodex 自己的家目录，与用户的 ~/.codex 完全隔离
@@ -45,6 +47,13 @@ INHERITED_KEYS = (
     "personality",
     "approval_policy",
     "plan_mode_reasoning_effort",
+)
+
+TASK_CONTEXT_ENV = (
+    "MULTICA_TOKEN",
+    "MULTICA_TASK_ID",
+    "MULTICA_AGENT_ID",
+    "MULTICA_WORKSPACE_ID",
 )
 
 
@@ -132,6 +141,61 @@ def read_key(home: Path) -> str | None:
     return None
 
 
+def request_session_key(
+    session_url: str,
+    *,
+    client: httpx.Client | None = None,
+) -> str:
+    """Exchange the current Multica task token for a task-bound pool key."""
+    context = {name: os.environ.get(name, "").strip() for name in TASK_CONTEXT_ENV}
+    missing = [name for name, value in context.items() if not value]
+    if missing:
+        raise McodexError(
+            "公司号池只能从 Multica 任务启动；缺少任务上下文："
+            + ", ".join(missing)
+        )
+    if not context["MULTICA_TOKEN"].startswith("mat_"):
+        raise McodexError("Multica 未提供任务级凭据（应为 mat_ 开头），拒绝申请号池密钥")
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=30.0, follow_redirects=False)
+    try:
+        response = http.post(
+            session_url,
+            headers={
+                "Authorization": f"Bearer {context['MULTICA_TOKEN']}",
+                "Accept": "application/json",
+            },
+            json={
+                "task_id": context["MULTICA_TASK_ID"],
+                "agent_id": context["MULTICA_AGENT_ID"],
+                "workspace_id": context["MULTICA_WORKSPACE_ID"],
+            },
+        )
+    except httpx.HTTPError as exc:
+        raise McodexError(f"无法连接公司号池凭证服务：{exc}") from exc
+    finally:
+        if owns_client:
+            http.close()
+
+    if response.status_code != 200:
+        try:
+            message = response.json().get("error", "")
+        except ValueError:
+            message = ""
+        detail = f"：{message}" if message else ""
+        raise McodexError(f"公司号池拒绝签发临时凭证（HTTP {response.status_code}）{detail}")
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise McodexError("公司号池返回了无效响应") from exc
+    key = payload.get("key") if isinstance(payload, dict) else None
+    if not isinstance(key, str) or not key.startswith("mcx_"):
+        raise McodexError("公司号池响应缺少任务绑定凭证")
+    return key
+
+
 def init_home(
     home: Path,
     spec: ProviderSpec,
@@ -198,7 +262,12 @@ def init_home(
     }
 
 
-def prepare_env(spec: ProviderSpec) -> dict[str, str]:
+def prepare_env(
+    spec: ProviderSpec,
+    session_url: str | None = None,
+    *,
+    client: httpx.Client | None = None,
+) -> dict[str, str]:
     """算出 exec 前要设置的环境变量，并按需注入 provider 配置。
 
     返回要追加/覆盖的环境变量。不直接改 os.environ，便于测试。
@@ -206,6 +275,9 @@ def prepare_env(spec: ProviderSpec) -> dict[str, str]:
     updates: dict[str, str] = {}
 
     daemon_home = os.environ.get("CODEX_HOME")
+    if session_url and not daemon_home:
+        raise McodexError("公司号池只允许在 Multica 任务中使用，请从 Multica 创建任务")
+
     if daemon_home:
         # multica 场景：daemon 已把 CODEX_HOME 指向 per-task 目录并拷好配置。
         # 不能改 CODEX_HOME（daemon 的 isBlockedEnvKey 也不允许用户覆盖），
@@ -222,6 +294,12 @@ def prepare_env(spec: ProviderSpec) -> dict[str, str]:
                 f"{home_for_key} 尚未初始化。先运行：poolctl mcodex init --key <密钥>"
             )
         updates["CODEX_HOME"] = str(home_for_key)
+
+    if session_url:
+        # Always override a stale/static key in task mode. The returned value is
+        # encrypted and bound to this task; it is never written to disk.
+        updates[spec.env_key] = request_session_key(session_url, client=client)
+        return updates
 
     if not os.environ.get(spec.env_key):
         key = read_key(home_for_key)
@@ -249,7 +327,7 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        updates = prepare_env(spec)
+        updates = prepare_env(spec, settings.pool_session_url)
         real_codex = find_real_codex(mcodex_home())
     except McodexError as exc:
         print(f"mcodex: {exc}", file=sys.stderr)
