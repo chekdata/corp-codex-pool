@@ -11,6 +11,7 @@ from corp_codex_pool.mcodex import (
     McodexError,
     find_real_codex,
     init_home,
+    is_version_probe,
     mcodex_home,
     prepare_env,
     read_key,
@@ -245,6 +246,15 @@ class TestPrepareEnv:
 
         with pytest.raises(McodexError, match="只允许在 Multica 任务"):
             prepare_env(spec, "https://pool.example/session-key")
+
+
+class TestVersionProbe:
+    def test_only_exact_version_probe_bypasses_task_context(self):
+        assert is_version_probe(["--version"])
+        assert is_version_probe(["-V"])
+        assert not is_version_probe([])
+        assert not is_version_probe(["--version", "app-server"])
+        assert not is_version_probe(["app-server", "--version"])
 
 
 class TestRequestSessionKey:

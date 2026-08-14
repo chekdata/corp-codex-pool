@@ -56,9 +56,16 @@ TASK_CONTEXT_ENV = (
     "MULTICA_WORKSPACE_ID",
 )
 
+VERSION_PROBE_ARGS = {"--version", "-V"}
+
 
 class McodexError(RuntimeError):
     pass
+
+
+def is_version_probe(args: list[str]) -> bool:
+    """Return true only for the side-effect-free daemon runtime probe."""
+    return len(args) == 1 and args[0] in VERSION_PROBE_ARGS
 
 
 def mcodex_home() -> Path:
@@ -327,8 +334,12 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     try:
-        updates = prepare_env(spec, settings.pool_session_url)
         real_codex = find_real_codex(mcodex_home())
+        updates = (
+            {}
+            if is_version_probe(args)
+            else prepare_env(spec, settings.pool_session_url)
+        )
     except McodexError as exc:
         print(f"mcodex: {exc}", file=sys.stderr)
         return 1
