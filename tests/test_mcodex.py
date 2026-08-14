@@ -3,6 +3,7 @@ import stat
 import tomllib
 
 import pytest
+import httpx
 
 from corp_codex_pool.codex_config import ProviderSpec
 from corp_codex_pool.mcodex import (
@@ -13,6 +14,7 @@ from corp_codex_pool.mcodex import (
     mcodex_home,
     prepare_env,
     read_key,
+    request_session_key,
 )
 
 HOST_CONFIG = '''\
@@ -38,7 +40,16 @@ def spec():
 @pytest.fixture(autouse=True)
 def clean_env(monkeypatch):
     """每个用例都从干净环境开始，避免真实环境泄漏进测试。"""
-    for name in ("CODEX_HOME", "GW_API_KEY", "MCODEX_HOME", "MCODEX_REAL_CODEX"):
+    for name in (
+        "CODEX_HOME",
+        "GW_API_KEY",
+        "MCODEX_HOME",
+        "MCODEX_REAL_CODEX",
+        "MULTICA_TOKEN",
+        "MULTICA_TASK_ID",
+        "MULTICA_AGENT_ID",
+        "MULTICA_WORKSPACE_ID",
+    ):
         monkeypatch.delenv(name, raising=False)
 
 
@@ -202,6 +213,69 @@ class TestPrepareEnv:
 
         with pytest.raises(McodexError, match="poolctl issue"):
             prepare_env(spec)
+
+    def test_task_mode_uses_bound_session_key(self, tmp_path, monkeypatch, spec):
+        task_home = tmp_path / "per-task"
+        task_home.mkdir()
+        (task_home / "config.toml").write_text("", encoding="utf-8")
+        monkeypatch.setenv("CODEX_HOME", str(task_home))
+        monkeypatch.setenv("GW_API_KEY", "legacy-static-key")
+        monkeypatch.setenv("MULTICA_TOKEN", "mat_task-secret")
+        monkeypatch.setenv("MULTICA_TASK_ID", "task-1")
+        monkeypatch.setenv("MULTICA_AGENT_ID", "agent-1")
+        monkeypatch.setenv("MULTICA_WORKSPACE_ID", "workspace-1")
+
+        def handler(request):
+            assert request.headers["Authorization"] == "Bearer mat_task-secret"
+            assert request.read() == (
+                b'{"task_id":"task-1","agent_id":"agent-1",'
+                b'"workspace_id":"workspace-1"}'
+            )
+            return httpx.Response(200, json={"key": "mcx_bound-secret"})
+
+        with httpx.Client(transport=httpx.MockTransport(handler)) as client:
+            updates = prepare_env(spec, "https://pool.example/session-key", client=client)
+
+        assert updates["GW_API_KEY"] == "mcx_bound-secret"
+        assert "CODEX_HOME" not in updates
+
+    def test_task_mode_rejects_standalone_use(self, tmp_path, monkeypatch, spec):
+        home = tmp_path / "h"
+        monkeypatch.setenv("MCODEX_HOME", str(home))
+
+        with pytest.raises(McodexError, match="只允许在 Multica 任务"):
+            prepare_env(spec, "https://pool.example/session-key")
+
+
+class TestRequestSessionKey:
+    def test_requires_complete_task_context(self):
+        with pytest.raises(McodexError, match="MULTICA_TOKEN"):
+            request_session_key("https://pool.example/session-key")
+
+    def test_rejects_personal_access_token(self, monkeypatch):
+        monkeypatch.setenv("MULTICA_TOKEN", "mul_personal")
+        monkeypatch.setenv("MULTICA_TASK_ID", "task-1")
+        monkeypatch.setenv("MULTICA_AGENT_ID", "agent-1")
+        monkeypatch.setenv("MULTICA_WORKSPACE_ID", "workspace-1")
+
+        with pytest.raises(McodexError, match="mat_ 开头"):
+            request_session_key("https://pool.example/session-key")
+
+    def test_redacts_server_response_details(self, monkeypatch):
+        monkeypatch.setenv("MULTICA_TOKEN", "mat_task-secret")
+        monkeypatch.setenv("MULTICA_TASK_ID", "task-1")
+        monkeypatch.setenv("MULTICA_AGENT_ID", "agent-1")
+        monkeypatch.setenv("MULTICA_WORKSPACE_ID", "workspace-1")
+
+        with httpx.Client(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(403, json={"error": "task binding mismatch"})
+            )
+        ) as client:
+            with pytest.raises(McodexError, match="task binding mismatch") as caught:
+                request_session_key("https://pool.example/session-key", client=client)
+
+        assert "mat_task-secret" not in str(caught.value)
 
 
 def _make_exe(path):
@@ -397,3 +471,17 @@ class TestDoctorModeDetection:
 
         monkeypatch.setenv("MCODEX_HOME", str(tmp_path / "nope"))
         assert check_mcodex_home("GW_API_KEY") == []
+
+    def test_task_bound_mode_does_not_require_static_key(self, tmp_path, monkeypatch, spec):
+        from corp_codex_pool.doctor import OK, check_mcodex_home
+
+        init_home(tmp_path, spec)
+        monkeypatch.setenv("MCODEX_HOME", str(tmp_path))
+
+        checks = check_mcodex_home(
+            "GW_API_KEY", "https://codex.chekkk.com/api/self-service/session-key"
+        )
+
+        credential = next(c for c in checks if c.name == "mcodex 任务绑定凭证")
+        assert credential.status == OK
+        assert "不写磁盘" in credential.detail

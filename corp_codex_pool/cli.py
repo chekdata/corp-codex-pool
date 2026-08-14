@@ -2,7 +2,7 @@
 
 设计原则：
 - 所有会改变状态的命令都支持 --dry-run，且默认打印将要发生的变更。
-- 密钥明文只在签发那一刻出现在终端一次，其余场合一律打码。
+- 正式员工入口不分发永久密钥；旧管理员命令输出的密钥其余场合一律打码。
 - 每一步失败都给出可执行的下一步，而不是只报错。
 """
 
@@ -68,10 +68,9 @@ def main(ctx, env_file):
 @click.option("--dry-run", is_flag=True, help="只显示将要写入的内容")
 @click.pass_context
 def setup(ctx, base_url, provider_id, env_key, config_path, no_default, no_headers, dry_run):
-    """向宿主 ~/.codex/config.toml 注入号池 provider。
+    """旧版管理员工具：向宿主 ~/.codex/config.toml 注入号池 provider。
 
-    multica daemon 会把这个文件原样拷贝进每个 per-task CODEX_HOME，
-    因此这一步做完，daemon 拉起的 codex 就会走号池，无需改 multica。
+    正式员工接入请使用 poolctl enroll；该命令仅保留用于迁移和排障。
     """
     settings = _settings(ctx)
     spec = ProviderSpec(
@@ -105,7 +104,7 @@ def setup(ctx, base_url, provider_id, env_key, config_path, no_default, no_heade
         click.echo(f"  备份：{result.backup}")
     click.echo(f"  provider = {spec.provider_id}   base_url = {spec.base_url}")
     click.echo(f"  密钥来源环境变量：{spec.env_key}")
-    click.echo("\n下一步：poolctl issue <员工标识> 签发密钥并下发")
+    click.echo("\n正式员工接入：poolctl enroll")
 
 
 def _print_block_diff(before: str, after: str) -> None:
@@ -151,7 +150,7 @@ def issue(
     ctx, person, agent_id, workspace_id, weekly_token_limit, allowed_model,
     expires_days, traffic_class, reuse, dry_run,
 ):
-    """为一名员工签发号池密钥，可选直接下发到 multica agent。
+    """旧版管理员工具：签发永久号池密钥并可选下发。
 
     PERSON 是员工标识，会成为密钥名（建议用工号或邮箱前缀）。
     """
@@ -432,7 +431,7 @@ def doctor(ctx, key, config_path, as_json):
         *doctor_mod.check_codex_config(
             settings.provider_id, settings.pool_base_url, settings.env_key, config_path
         ),
-        *doctor_mod.check_mcodex_home(settings.env_key),
+        *doctor_mod.check_mcodex_home(settings.env_key, settings.pool_session_url),
     ]
 
     if key:
@@ -447,46 +446,51 @@ def doctor(ctx, key, config_path, as_json):
                 doctor_mod.Check("multica 连通", doctor_mod.OK, f"{identity.name} <{identity.email}>")
             )
             agents = mc.agents()
-            delivered = [
-                a for a in agents if settings.env_key in (mc.get_env(a["id"]) or {})
-            ]
-
-            # 密钥有两个来源，任一成立即可：
-            #   per-agent  —— agent 的 custom_env，适合一台机器多人/多档位
-            #   机器级     —— mcodex 家目录的密钥文件，一台机器一把
-            # 只有两者都没有才是真问题。
-            from .mcodex import KEY_FILENAME, mcodex_home
-
-            machine_key = (mcodex_home() / KEY_FILENAME).exists()
-
-            if delivered:
+            if settings.pool_session_url:
                 checks.append(
                     doctor_mod.Check(
-                        "agent 密钥来源",
+                        "agent 凭证模式",
                         doctor_mod.OK,
-                        f"{len(delivered)}/{len(agents)} 个 agent 带有 {settings.env_key}"
-                        "（per-agent，优先于机器级密钥）",
-                    )
-                )
-            elif machine_key:
-                checks.append(
-                    doctor_mod.Check(
-                        "agent 密钥来源",
-                        doctor_mod.OK,
-                        f"未使用 custom_env，{len(agents)} 个 agent 统一走 mcodex 机器级密钥",
+                        f"{len(agents)} 个 agent 均在任务启动时使用 mat_ 票据换取临时凭证",
                     )
                 )
             else:
-                checks.append(
-                    doctor_mod.Check(
-                        "agent 密钥来源",
-                        doctor_mod.FAIL,
-                        f"{len(agents)} 个 agent 都没有 {settings.env_key}，"
-                        "mcodex 家目录也没有密钥文件",
-                        "机器级：poolctl mcodex init --key-stdin\n"
-                        "    或按人下发：poolctl issue <员工> --agent-id <id>",
+                delivered = [
+                    a for a in agents if settings.env_key in (mc.get_env(a["id"]) or {})
+                ]
+
+                # Legacy/manual deployments may still use per-agent or machine keys.
+                from .mcodex import KEY_FILENAME, mcodex_home
+
+                machine_key = (mcodex_home() / KEY_FILENAME).exists()
+                if delivered:
+                    checks.append(
+                        doctor_mod.Check(
+                            "agent 密钥来源",
+                            doctor_mod.OK,
+                            f"{len(delivered)}/{len(agents)} 个 agent 带有 {settings.env_key}"
+                            "（per-agent，优先于机器级密钥）",
+                        )
                     )
-                )
+                elif machine_key:
+                    checks.append(
+                        doctor_mod.Check(
+                            "agent 密钥来源",
+                            doctor_mod.OK,
+                            f"未使用 custom_env，{len(agents)} 个 agent 统一走 mcodex 机器级密钥",
+                        )
+                    )
+                else:
+                    checks.append(
+                        doctor_mod.Check(
+                            "agent 密钥来源",
+                            doctor_mod.FAIL,
+                            f"{len(agents)} 个 agent 都没有 {settings.env_key}，"
+                            "mcodex 家目录也没有密钥文件",
+                            "机器级：poolctl mcodex init --key-stdin\n"
+                            "    或按人下发：poolctl issue <员工> --agent-id <id>",
+                        )
+                    )
     except MulticaError as exc:
         checks.append(
             doctor_mod.Check("multica 连通", doctor_mod.WARN, str(exc), "运行 multica login")
@@ -567,6 +571,8 @@ def mcodex_init(ctx, key, key_stdin, inherit, home, real_codex):
         click.echo(f"  已继承偏好：{', '.join(info['inherited'])}（未复制任何凭据）")
     if info["key_stored"]:
         click.echo(f"  密钥已存入 {info['home']}/key（600）")
+    elif settings.pool_session_url:
+        click.echo("  凭证：由 Multica 每个任务启动时自动签发，不写入磁盘")
     else:
         click.secho(
             f"  ! 尚无密钥。设置环境变量 {settings.env_key}，"
@@ -574,6 +580,63 @@ def mcodex_init(ctx, key, key_stdin, inherit, home, real_codex):
             fg="yellow",
         )
     click.echo(f"\n你的 ~/.codex 未被改动。现在可以直接用：mcodex exec \"...\"")
+
+
+@main.command()
+@click.option("--inherit/--no-inherit", default=True, show_default=True,
+              help="从 ~/.codex/config.toml 继承使用偏好，不含任何凭据")
+@click.option("--home", type=click.Path(path_type=Path), help="自定义 mcodex 家目录")
+@click.option("--real-codex", type=click.Path(path_type=Path), help="真 codex 的绝对路径")
+@click.option("--restart-daemon/--no-restart-daemon", default=True, show_default=True)
+@click.pass_context
+def enroll(ctx, inherit, home, real_codex, restart_daemon):
+    """一次性接入公司号池；后续凭证按 Multica 任务自动签发。"""
+    import subprocess
+
+    from .mcodex import DEFAULT_MCODEX_HOME, KEY_FILENAME, McodexError, init_home
+    from .multica import load_local_config
+
+    settings = _settings(ctx)
+    try:
+        config = load_local_config()
+        if not str(config.get("token", "")).strip():
+            raise MulticaError("本机 Multica 尚未登录")
+        spec = ProviderSpec(
+            provider_id=settings.provider_id,
+            base_url=settings.pool_base_url,
+            env_key=settings.env_key,
+        )
+        target = home or DEFAULT_MCODEX_HOME
+        info = init_home(
+            target,
+            spec,
+            inherit_from=Path.home() / ".codex" / "config.toml" if inherit else None,
+            real_codex=str(real_codex) if real_codex else None,
+        )
+        # Remove legacy permanent credentials so task-bound exchange is the
+        # only remaining employee path.
+        legacy_key = target / KEY_FILENAME
+        if legacy_key.exists():
+            legacy_key.unlink()
+    except (McodexError, MulticaError, OSError, ValueError) as exc:
+        _fail(str(exc))
+        return
+
+    click.secho("✓ 已接入公司号池", fg="green")
+    click.echo(f"  Multica：{config.get('server_url', '')}")
+    click.echo(f"  mcodex：{info['config']}")
+    click.echo("  凭证：任务启动时自动申请，任务外无法使用")
+
+    if not restart_daemon:
+        click.echo("\n下一步：poolctl daemon restart")
+        return
+
+    env = _daemon_env(settings)
+    subprocess.run(["multica", "daemon", "stop"], env=env, check=False)
+    result = subprocess.run(["multica", "daemon", "start"], env=env, check=False)
+    if result.returncode != 0:
+        _fail("Multica daemon 启动失败", "运行 poolctl daemon status 查看状态")
+    click.secho("✓ Multica daemon 已使用 mcodex 启动", fg="green")
 
 
 @main.group()
