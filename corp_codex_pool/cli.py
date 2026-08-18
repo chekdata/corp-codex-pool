@@ -2,7 +2,7 @@
 
 设计原则：
 - 所有会改变状态的命令都支持 --dry-run，且默认打印将要发生的变更。
-- 正式员工入口不分发永久密钥；旧管理员命令输出的密钥其余场合一律打码。
+- 正式员工只拿到网关包装凭证，不接触底层号池密钥；旧管理员命令输出的密钥其余场合一律打码。
 - 每一步失败都给出可执行的下一步，而不是只报错。
 """
 
@@ -19,9 +19,11 @@ from . import doctor as doctor_mod
 from .codex_config import (
     ConfigInjectionError,
     ProviderSpec,
+    default_auth_path,
     default_config_path,
     inject,
     remove,
+    write_openai_auth_key,
 )
 from .config import Settings
 from .gateway import (
@@ -116,6 +118,58 @@ def _print_block_diff(before: str, after: str) -> None:
     for line in diff:
         color = "green" if line.startswith("+") else "red" if line.startswith("-") else None
         click.secho(line.rstrip("\n"), fg=color)
+
+
+# ---------------------------------------------------------------- official GUI
+
+@main.group()
+def gui():
+    """配置官方 Codex GUI 使用公司受管号池。"""
+
+
+@gui.command("configure")
+@click.option("--key-stdin", is_flag=True, help="从 stdin 读取凭证")
+@click.option("--config", "config_path", type=click.Path(path_type=Path))
+@click.option("--auth", "auth_path", type=click.Path(path_type=Path))
+@click.option("--dry-run", is_flag=True, help="仅校验，不写文件")
+@click.pass_context
+def gui_configure(ctx, key_stdin, config_path, auth_path, dry_run):
+    """一次性配置官方 Codex GUI；不安装或替换 Codex 启动器。"""
+    settings = _settings(ctx)
+    if key_stdin:
+        credential = sys.stdin.read().strip()
+    else:
+        credential = click.prompt("粘贴 Multica 里生成的 mck_ 凭证", hide_input=True).strip()
+    if not credential.startswith("mck_"):
+        _fail("凭证格式不正确", "请在 Multica 设置 → Tokens → 公司 Codex 访问中重新生成")
+
+    spec = ProviderSpec(
+        provider_id="chek",
+        name="CHEK Company Codex",
+        base_url=settings.pool_base_url,
+        requires_openai_auth=True,
+        env_http_headers={},
+    )
+    target_config = config_path or default_config_path()
+    target_auth = auth_path or default_auth_path()
+    try:
+        config_result = inject(spec, path=target_config, dry_run=dry_run)
+        auth_backup = write_openai_auth_key(credential, path=target_auth, dry_run=dry_run)
+    except (ConfigInjectionError, OSError) as exc:
+        _fail(str(exc))
+        return
+
+    if dry_run:
+        click.secho("[dry-run] 配置与凭证校验通过，未写入文件", fg="yellow")
+        return
+    click.secho("✓ 官方 Codex GUI 已切换到 CHEK 公司号池", fg="green")
+    click.echo(f"  配置：{config_result.path}")
+    click.echo(f"  凭证：{target_auth}（600，仅更新 OPENAI_API_KEY）")
+    if config_result.backup:
+        click.echo(f"  配置备份：{config_result.backup}")
+    if auth_backup:
+        click.echo(f"  凭证备份：{auth_backup}")
+    click.echo("\n请完全退出并重新打开官方 Codex GUI。所有公司号池对话会同步到 Multica。")
 
 
 @main.command("unsetup")

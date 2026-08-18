@@ -19,6 +19,7 @@ TOML 本身保证所有顶层键都在第一个 table 之前，这个位置既�
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -51,6 +52,9 @@ class ProviderSpec:
     base_url: str = "https://codex.chekkk.com/v1"
     env_key: str = "GW_API_KEY"
     env_key_instructions: str = "由号池控制台下发，请勿手工设置"
+    # Official Codex GUI does not inherit a shell environment. In this mode
+    # Codex reads OPENAI_API_KEY from auth.json instead of env_key.
+    requires_openai_auth: bool = False
     # wire_api 只接受 "responses"："chat" 已从 codex 移除
     # (codex-rs/model-provider-info/src/lib.rs:49, :71-81)
     wire_api: str = "responses"
@@ -77,7 +81,7 @@ class ProviderSpec:
             raise ConfigInjectionError(
                 f"provider_id 只允许字母数字下划线连字符，收到 {self.provider_id!r}"
             )
-        if not re.fullmatch(r"[A-Z][A-Z0-9_]*", self.env_key):
+        if not self.requires_openai_auth and not re.fullmatch(r"[A-Z][A-Z0-9_]*", self.env_key):
             raise ConfigInjectionError(
                 f"env_key 应为大写环境变量名，收到 {self.env_key!r}"
             )
@@ -112,9 +116,12 @@ def render_block(spec: ProviderSpec) -> str:
     lines.append(f"name = {_toml_str(spec.name)}")
     lines.append(f"base_url = {_toml_str(spec.base_url)}")
     lines.append(f"wire_api = {_toml_str(spec.wire_api)}")
-    lines.append(f"env_key = {_toml_str(spec.env_key)}")
-    if spec.env_key_instructions:
-        lines.append(f"env_key_instructions = {_toml_str(spec.env_key_instructions)}")
+    if spec.requires_openai_auth:
+        lines.append("requires_openai_auth = true")
+    else:
+        lines.append(f"env_key = {_toml_str(spec.env_key)}")
+        if spec.env_key_instructions:
+            lines.append(f"env_key_instructions = {_toml_str(spec.env_key_instructions)}")
 
     if spec.env_http_headers:
         lines.append("")
@@ -177,11 +184,15 @@ def verify(text: str, spec: ProviderSpec) -> dict:
         )
 
     provider = providers[spec.provider_id]
-    for key, expected in (
+    expected_fields = [
         ("base_url", spec.base_url),
         ("wire_api", spec.wire_api),
-        ("env_key", spec.env_key),
-    ):
+    ]
+    if spec.requires_openai_auth:
+        expected_fields.append(("requires_openai_auth", True))
+    else:
+        expected_fields.append(("env_key", spec.env_key))
+    for key, expected in expected_fields:
         if provider.get(key) != expected:
             raise ConfigInjectionError(
                 f"model_providers.{spec.provider_id}.{key} 期望 {expected!r}，"
@@ -210,6 +221,53 @@ def default_config_path() -> Path:
     home = os.environ.get("CODEX_HOME")
     base = Path(home) if home else Path.home() / ".codex"
     return base / "config.toml"
+
+
+def default_auth_path() -> Path:
+    """Official Codex auth.json next to config.toml."""
+    return default_config_path().with_name("auth.json")
+
+
+def write_openai_auth_key(
+    key: str,
+    path: Path | None = None,
+    *,
+    dry_run: bool = False,
+) -> Path | None:
+    """Upsert OPENAI_API_KEY without removing an existing official login."""
+    key = key.strip()
+    if not key:
+        raise ConfigInjectionError("API 凭证不能为空")
+    path = path or default_auth_path()
+    original = path.read_text(encoding="utf-8") if path.exists() else "{}"
+    try:
+        data = json.loads(original)
+    except json.JSONDecodeError as exc:
+        raise ConfigInjectionError(f"现有 auth.json 不是合法 JSON：{exc}") from exc
+    if not isinstance(data, dict):
+        raise ConfigInjectionError("现有 auth.json 必须是 JSON 对象")
+    data["OPENAI_API_KEY"] = key
+    rendered = json.dumps(data, ensure_ascii=False, indent=2) + "\n"
+    if dry_run:
+        return None
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    backup_path = None
+    if path.exists():
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+        backup_path = path.with_suffix(f".json.bak-{stamp}")
+        shutil.copy2(path, backup_path)
+    tmp = path.with_suffix(".json.tmp")
+    try:
+        tmp.write_text(rendered, encoding="utf-8")
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        tmp.unlink(missing_ok=True)
+        if backup_path and backup_path.exists():
+            shutil.copy2(backup_path, path)
+        raise
+    return backup_path
 
 
 @dataclass
