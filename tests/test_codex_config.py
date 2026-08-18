@@ -1,3 +1,4 @@
+import json
 import tomllib
 
 import pytest
@@ -13,6 +14,7 @@ from corp_codex_pool.codex_config import (
     render_block,
     strip_block,
     verify,
+    write_openai_auth_key,
 )
 
 # 取自真实宿主配置的形状：顶层键在前，[projects.*] 在后
@@ -107,6 +109,12 @@ class TestProviderFields:
         s = spec(name='Acme "Pool" Inc')
         data = tomllib.loads(build_new_text(REAL_CONFIG, s))
         assert data["model_providers"]["gw"]["name"] == 'Acme "Pool" Inc'
+
+    def test_official_gui_uses_auth_json_instead_of_environment(self):
+        gui = spec(requires_openai_auth=True, env_http_headers={})
+        provider = tomllib.loads(build_new_text(REAL_CONFIG, gui))["model_providers"]["gw"]
+        assert provider["requires_openai_auth"] is True
+        assert "env_key" not in provider
 
 
 class TestIdempotence:
@@ -233,3 +241,21 @@ class TestFileOps:
         assert tomllib.loads(out)["model_provider"] == "gw"
         # 我们的块不能插进 multica 的块里
         assert out.index("# END multica-managed") < out.index(BEGIN)
+
+
+class TestOfficialGuiAuth:
+    def test_preserves_official_login_fields(self, tmp_path):
+        auth = tmp_path / "auth.json"
+        auth.write_text(json.dumps({"tokens": {"access_token": "official"}}), encoding="utf-8")
+
+        backup = write_openai_auth_key("mck_test", auth)
+
+        stored = json.loads(auth.read_text(encoding="utf-8"))
+        assert stored["tokens"]["access_token"] == "official"
+        assert stored["OPENAI_API_KEY"] == "mck_test"
+        assert backup is not None and backup.exists()
+        assert auth.stat().st_mode & 0o777 == 0o600
+
+    def test_rejects_empty_key(self, tmp_path):
+        with pytest.raises(ConfigInjectionError, match="不能为空"):
+            write_openai_auth_key("", tmp_path / "auth.json")

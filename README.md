@@ -2,7 +2,7 @@
 
 把多个 Codex 订阅变成一个内部号池，让 [Multica](https://github.com/multica-ai/multica) 任务按人、按任务使用和审计公司额度。
 
-**CHEK 正式环境不向员工分发永久 Key，只允许 Multica 任务中的 `mcodex` 申请短时、任务绑定凭证；你自己的 `codex` 不受影响。**
+**CHEK 正式环境提供两条受管路径：Multica 任务使用运行期绑定凭证；员工也可为官方 Codex GUI 申请无固定到期日、但可即时撤销且会话自动同步的个人凭证。**
 
 ```
 codex   →  provider: openai  →  你的个人订阅
@@ -86,7 +86,7 @@ flowchart LR
     G -.per-request 计量.-> DB[(用量表)]
 ```
 
-CHEK 正式环境只覆盖一种运行场景：**Multica daemon 拉起**。daemon 把 `CODEX_HOME` 和 `mat_` 任务票据注入进程，`mcodex` 用任务票向生产桥接层换取两小时有效的 `mcx_` 凭证，再 exec 真 Codex。直接在终端运行 `mcodex` 因缺少任务上下文会失败。
+Multica daemon 拉起的任务仍走 `mcodex`：daemon 注入 `CODEX_HOME` 与任务上下文，网关在每次请求时确认 Run 仍处于活动状态，Run 结束后凭证立即失效。官方 Codex GUI 则使用员工在 Multica 自助生成的 `mck_` 凭证，每次请求回查工作空间成员与密钥状态，并把会话同步回 Multica。
 
 ### 依赖的三个上游机制
 
@@ -178,6 +178,14 @@ poolctl enroll
 ```
 ✓ daemon 使用的 codex：/…/mcodex（走号池）
 ```
+
+### 官方 Codex GUI / CC Switch
+
+1. 飞连登录 Multica，进入 `设置 → Tokens → 公司 Codex 访问`。
+2. 点击“创建访问”。推荐直接点“在 CC Switch 中打开”，确认导入后重启官方 Codex GUI。
+3. 不使用 CC Switch 时，安装本仓库后运行 `poolctl gui configure`，按隐藏提示粘贴凭证，再重启官方 Codex GUI。
+
+该命令只更新官方 Codex 的 `config.toml` 与 `auth.json`，保留已有官方登录字段，不安装启动器。凭证没有固定过期时间；轮换、主动撤销或被移出工作空间后会立即失效。GUI 中的提问、回复、模型、Token 与时间会同步到 Multica，禁止用于非公司工作。
 
 ### 验证
 
