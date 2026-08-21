@@ -1,6 +1,6 @@
 [project]
 name = "corp-codex-pool"
-version = "0.3.0"
+version = "0.3.1"
 description = "Codex 号池与 multica 运行时的集成层：provider 注入、密钥下发、用量对账"
 requires-python = ">=3.11"
 dependencies = [

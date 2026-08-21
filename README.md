@@ -323,9 +323,14 @@ poolctl daemon restart
 poolctl daemon status
 ```
 
-multica 只能通过 `MULTICA_CODEX_PATH` 环境变量指定 codex 路径（它的 `config.json` 只支持 `server_url` / `app_url` / `workspace_id` 三个键）。直接 `multica daemon start` 拿不到这个变量，daemon 会**悄悄退回系统 codex、绕开号池**。
+`poolctl daemon start/restart` 会将 `mcodex` 绝对路径持久化到
+`~/.multica/config.json` 的 `backends.codex.binary_path`，同时传入
+`MULTICA_CODEX_PATH` 以兼容旧版 Multica。持久化后，直接运行
+`multica daemon start` 也会继续使用 `mcodex`。
 
-> ⚠️ **别用 `multica daemon restart` 代替 `poolctl daemon restart`。** 前者由已在运行的 daemon 自己拉起新进程，会继承旧环境，新设的变量传不进去。`poolctl daemon restart` 是 stop 再 start。
+> ⚠️ **旧版 Multica 仍请使用 `poolctl daemon restart`。** 旧版不读取
+> `backends.codex.binary_path`，而 `multica daemon restart` 只会继承旧进程环境。
+> 待 Multica 支持该持久化配置后，两种启动方式都会继续使用 `mcodex`。
 
 ---
 

@@ -17,6 +17,8 @@
 from __future__ import annotations
 
 import json
+import os
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -41,6 +43,59 @@ def load_local_config(path: Path | None = None) -> dict[str, Any]:
     if not path.exists():
         raise MulticaError(f"找不到 multica 配置：{path}。请先运行 multica login。")
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def persist_codex_binary_path(
+    binary_path: str | Path,
+    config_path: Path | None = None,
+) -> bool:
+    """Persist the daemon's Codex executable without dropping other config.
+
+    Newer Multica daemons read ``backends.codex.binary_path`` directly. The
+    pool wrapper still exports ``MULTICA_CODEX_PATH`` for compatibility with
+    older daemons, but persisting the same path makes a later plain
+    ``multica daemon start`` retain mcodex.
+    """
+    binary = Path(binary_path).expanduser()
+    if not binary.is_absolute():
+        raise MulticaError(f"mcodex 路径必须是绝对路径：{binary}")
+
+    path = config_path or Path.home() / ".multica" / "config.json"
+    config = load_local_config(path)
+    backends = config.setdefault("backends", {})
+    if not isinstance(backends, dict):
+        raise MulticaError("multica 配置中 backends 必须是对象")
+    codex = backends.setdefault("codex", {})
+    if not isinstance(codex, dict):
+        raise MulticaError("multica 配置中 backends.codex 必须是对象")
+
+    normalized = str(binary.resolve(strict=False))
+    if codex.get("binary_path") == normalized:
+        return False
+    codex["binary_path"] = normalized
+
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding="utf-8",
+            dir=path.parent,
+            prefix=".config-",
+            suffix=".json.tmp",
+            delete=False,
+        ) as temp:
+            temp_path = Path(temp.name)
+            json.dump(config, temp, ensure_ascii=False, indent=2)
+            temp.write("\n")
+            temp.flush()
+            os.fsync(temp.fileno())
+        temp_path.chmod(0o600)
+        os.replace(temp_path, path)
+    except OSError as exc:
+        if temp_path is not None:
+            temp_path.unlink(missing_ok=True)
+        raise MulticaError(f"写入 multica 配置失败：{exc}") from exc
+    return True
 
 
 class MulticaClient:
