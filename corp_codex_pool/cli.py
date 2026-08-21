@@ -33,7 +33,7 @@ from .gateway import (
     summarize_by_key,
     summarize_by_session,
 )
-from .multica import MulticaClient, MulticaError
+from .multica import MulticaClient, MulticaError, persist_codex_binary_path
 
 CONTEXT = {"help_option_names": ["-h", "--help"]}
 
@@ -681,11 +681,11 @@ def enroll(ctx, inherit, home, real_codex, restart_daemon):
     click.echo(f"  mcodex：{info['config']}")
     click.echo("  凭证：任务启动时自动申请，任务外无法使用")
 
+    env = _daemon_env(settings)
     if not restart_daemon:
         click.echo("\n下一步：poolctl daemon restart")
         return
 
-    env = _daemon_env(settings)
     subprocess.run(["multica", "daemon", "stop"], env=env, check=False)
     result = subprocess.run(["multica", "daemon", "start"], env=env, check=False)
     if result.returncode != 0:
@@ -697,11 +697,9 @@ def enroll(ctx, inherit, home, real_codex, restart_daemon):
 def daemon():
     """带号池配置启停 multica daemon。
 
-    multica 只能通过 MULTICA_CODEX_PATH 环境变量指定 codex 可执行文件，
-    它的 config.json 不支持这个键。直接 `multica daemon start` 拿不到这个
-    变量，daemon 就会退回系统 codex、绕开号池。
-
-    这组命令在启动前把变量设好，避免依赖 shell profile 或人工记忆。
+    启动前同时持久化 backends.codex.binary_path 并设置
+    MULTICA_CODEX_PATH。前者保证之后直接 `multica daemon start`
+    仍使用 mcodex，后者兼容尚未支持持久化路径的旧版 Multica。
     """
 
 
@@ -712,6 +710,10 @@ def _daemon_env(settings) -> dict[str, str]:
     found = _shutil.which("mcodex")
     if not found:
         _fail("PATH 里找不到 mcodex", "先 pip install -e .")
+    try:
+        persist_codex_binary_path(found)
+    except MulticaError as exc:
+        _fail(str(exc), "先运行 multica login 并检查 ~/.multica/config.json")
     return {**os.environ, "MULTICA_CODEX_PATH": found}
 
 

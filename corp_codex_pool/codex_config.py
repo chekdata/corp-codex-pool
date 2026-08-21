@@ -33,6 +33,13 @@ END = "# END corp-codex-pool"
 
 # 行首的 [table] 或 [[array-of-table]] 头
 _TABLE_RE = re.compile(r"^\s*\[\[?[^\[\]]", re.MULTILINE)
+_TABLE_HEADER_RE = re.compile(
+    r"^\s*\[([^\[\]]+)\]\s*(?:#.*)?(?:\r?\n)?$"
+)
+_TOP_LEVEL_MODEL_PROVIDER_RE = re.compile(
+    r"^[ \t]*model_provider[ \t]*=[^\n]*(?:\n|$)",
+    re.MULTILINE,
+)
 
 
 class ConfigInjectionError(RuntimeError):
@@ -149,9 +156,36 @@ def _insert_position(text: str) -> int:
     return match.start() if match else len(text)
 
 
+def _strip_conflicting_entries(text: str, spec: ProviderSpec) -> str:
+    """Remove entries owned by the managed provider block.
+
+    A per-task config is copied from the host before mcodex injects its block.
+    The host may already select another provider (for example the official GUI
+    integration) or contain an older unmanaged definition of this provider.
+    Keeping either entry would make the resulting TOML redefine a key/table.
+    """
+    if spec.set_default:
+        pos = _insert_position(text)
+        head = _TOP_LEVEL_MODEL_PROVIDER_RE.sub("", text[:pos])
+        text = head + text[pos:]
+
+    provider_table = f"model_providers.{spec.provider_id}"
+    output: list[str] = []
+    skipping = False
+    for line in text.splitlines(keepends=True):
+        match = _TABLE_HEADER_RE.match(line)
+        if match:
+            table = match.group(1).strip()
+            skipping = table == provider_table or table.startswith(provider_table + ".")
+        if not skipping:
+            output.append(line)
+    return "".join(output)
+
+
 def build_new_text(original: str, spec: ProviderSpec) -> str:
     """算出注入后的完整文件内容（纯函数，便于测试）。"""
     body = strip_block(original)
+    body = _strip_conflicting_entries(body, spec)
     block = render_block(spec)
     pos = _insert_position(body)
 

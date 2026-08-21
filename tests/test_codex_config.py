@@ -141,6 +141,42 @@ class TestIdempotence:
         injected = build_new_text(REAL_CONFIG, spec())
         assert tomllib.loads(strip_block(injected)) == tomllib.loads(REAL_CONFIG)
 
+    def test_existing_default_provider_is_replaced_without_duplicate_key(self):
+        src = '''\
+model_provider = "chek"
+
+[model_providers.chek]
+name = "Official managed access"
+base_url = "https://official.example.com/v1"
+wire_api = "responses"
+requires_openai_auth = true
+'''
+
+        data = tomllib.loads(build_new_text(src, spec()))
+
+        assert data["model_provider"] == "gw"
+        assert data["model_providers"]["chek"]["requires_openai_auth"] is True
+        assert data["model_providers"]["gw"]["base_url"] == "https://gw.example.com/v1"
+
+    def test_existing_unmanaged_same_provider_is_replaced(self):
+        src = '''\
+model_provider = "gw"
+
+[model_providers.gw]
+name = "Old pool"
+base_url = "https://old.example.com/v1"
+wire_api = "responses"
+env_key = "OLD_POOL_KEY"
+'''
+
+        out = build_new_text(src, spec())
+        data = tomllib.loads(out)
+
+        assert out.count("model_provider =") == 1
+        assert out.count("[model_providers.gw]") == 1
+        assert data["model_providers"]["gw"]["base_url"] == "https://gw.example.com/v1"
+        assert data["model_providers"]["gw"]["env_key"] == "GW_API_KEY"
+
 
 class TestValidation:
     def test_wire_api_chat_rejected(self):
